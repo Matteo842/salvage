@@ -40,6 +40,12 @@ Repos already in that folder are found and added on first run.
 - Windows 10 or 11
 - [`git`](https://git-scm.com/download/win) in your `PATH`
 
+## Download
+
+Grab `Salvage.exe` from the [latest release](https://github.com/Matteo842/salvage/releases/latest).
+It is a single file, no installer. The exe is not signed, so Windows SmartScreen
+may ask for confirmation the first time.
+
 ## Build and run
 
 ```
