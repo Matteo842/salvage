@@ -28,6 +28,8 @@ pub enum Icon {
     Down,
     /// A link that no longer answers.
     Skull,
+    /// Magnifying glass.
+    Search,
 }
 
 /// Draw `icon` centred on `c`; `s` is the half-size in points.
@@ -110,6 +112,10 @@ pub fn icon(p: &Painter, c: Pos2, s: f32, icon: Icon, col: Color32) {
             for x in [-0.18, 0.18] {
                 p.line_segment([at(x, 0.66), at(x, 1.04)], Stroke::new(1.0, GLASS_BASE()));
             }
+        }
+        Icon::Search => {
+            p.circle_stroke(at(-0.18, -0.18), s * 0.6, st);
+            line((0.27, 0.27), (0.85, 0.85));
         }
     }
 }

@@ -1223,16 +1223,62 @@ impl App {
         ui.painter()
             .line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, LINE()));
 
-        let list = Rect::from_min_max(pos2(rect.left() + 1.0, head.bottom() + 1.0), rect.max - vec2(1.0, 1.0));
+        let mut list = Rect::from_min_max(pos2(rect.left() + 1.0, head.bottom() + 1.0), rect.max - vec2(1.0, 1.0));
+        if self.cfg.projects.is_empty() {
+            let mut lui = ui.new_child(UiBuilder::new().max_rect(list).id_salt("list"));
+            lui.set_clip_rect(list.intersect(ui.clip_rect()));
+            self.empty_state(&mut lui, list, acts);
+            return;
+        }
+
+        // Search only shows up once the rows no longer fit; it stays while something is typed,
+        // so a filter never ends up applied without a way to see or clear it.
+        let qid = Id::new("repo_search");
+        let mut query: String = ui.ctx().data_mut(|d| d.get_temp(qid)).unwrap_or_default();
+        let overflow = self.cfg.projects.len() as f32 * ROW_H > list.height();
+        if overflow || !query.is_empty() {
+            let strip = Rect::from_min_max(list.min, pos2(list.right(), list.top() + 52.0));
+            widgets::icon(ui.painter(), pos2(rect.left() + 30.0, strip.center().y), 6.5, Icon::Search, KELP());
+            let fr = Rect::from_min_max(pos2(rect.left() + 58.0, strip.top()), pos2(rect.right() - 18.0, strip.bottom()));
+            let resp = ui
+                .allocate_new_ui(UiBuilder::new().max_rect(fr).layout(Layout::left_to_right(Align::Center)), |ui| {
+                    field(ui, qid.with("field"), &mut query, tr("search by name or link", "cerca per nome o link"), fr.width())
+                })
+                .inner;
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                query.clear();
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(qid, query.clone()));
+            ui.painter().line_segment(
+                [pos2(rect.left() + 58.0, strip.bottom()), pos2(rect.right() - 18.0, strip.bottom())],
+                Stroke::new(1.0, alpha(LINE(), 0.7)),
+            );
+            list.min.y = strip.bottom() + 1.0;
+        }
+
+        let needle = query.trim().to_lowercase();
+        let shown: Vec<&Project> = self
+            .cfg
+            .projects
+            .iter()
+            .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle) || p.url.to_lowercase().contains(&needle))
+            .collect();
+
         let mut lui = ui.new_child(UiBuilder::new().max_rect(list).id_salt("list"));
         lui.set_clip_rect(list.intersect(ui.clip_rect()));
-        if self.cfg.projects.is_empty() {
-            self.empty_state(&mut lui, list, acts);
+        if shown.is_empty() {
+            lui.painter().text(
+                pos2(list.center().x, list.top() + 60.0),
+                Align2::CENTER_CENTER,
+                tr("No repo matches.", "Nessun repo corrisponde."),
+                mono(12.5),
+                KELP(),
+            );
             return;
         }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            for pr in &self.cfg.projects {
+            for pr in shown {
                 self.row(ui, pr, acts);
             }
         });
