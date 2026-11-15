@@ -335,6 +335,9 @@ impl App {
             _lock: model::lock(),
         };
         app.say(LogKind::Info, t!("backup folder: {}", "cartella dei backup: {}", app.cfg.root.display()));
+        if let Some(dir) = model::portable_dir() {
+            app.say(LogKind::Info, t!("portable: settings kept in {}", "portatile: impostazioni in {}", dir.display()));
+        }
         if first_run || root_changed {
             app.save();
             app.import();

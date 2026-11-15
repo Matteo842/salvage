@@ -29,7 +29,8 @@ everything, and you can point the backup at the new link in two clicks.
   it is downloaded and checked against its sha256 (or its size, when the host
   publishes no hash) before the oldest one is deleted. Each repo can put its
   releases in a folder of its own instead of the backup folder; in there
-  Salvage only ever moves or deletes the folders it made. Works with GitHub,
+  Salvage only ever moves or deletes the folders it made, which it lists in
+  `releases.json` next to its config (not in the folder itself). Works with GitHub,
   GitLab and Gitea/Forgejo. You can keep only the releases, without mirror or
   working copy.
 - **Keeps a program up to date.** Pick one release file and a folder: at every
@@ -86,9 +87,23 @@ target\release\salvage.exe --root "D:\backup"
 ```
 
 `--root` is only needed the first time (you can also change the folder in the
-settings). The list is stored in `%APPDATA%\Salvage\config.json`, and the log
-of the last scheduled run in `%APPDATA%\Salvage\last-sync.log`. On Linux both
-live in `~/.config/salvage/`, and the default backup folder is `~/Salvage`.
+settings). The list is stored in `%APPDATA%\Salvage\config.json`, the log of
+the last scheduled run in `last-sync.log` and the release folders Salvage made
+in `releases.json`, all in that same folder. On Linux they live in
+`~/.config/salvage/`, and the default backup folder is `~/Salvage`.
+
+### Portable mode
+
+Put an empty file named `portable` (or `portable.txt`) next to the executable,
+and Salvage keeps all of its own files in that folder instead: `config.json`,
+`releases.json`, `last-sync.log` and its lock file. Nothing goes in
+`%APPDATA%\Salvage` or `~/.config/salvage`, so the folder can live on a USB
+stick or be copied to another computer (only the scheduled sync, if you turn it
+on, is still registered with the system: Task Scheduler, or a systemd user
+timer). The backups themselves still go in the backup folder you
+choose. To carry over an existing setup, copy `config.json` and `releases.json`
+from `%APPDATA%\Salvage` (or `~/.config/salvage`) next to the executable.
+The scheduled sync runs the same executable, so it finds the same files.
 
 The Linux tarball is built with `packaging/linux/build.sh` (on Linux or WSL,
 with `rustup`, `zig` and `cargo-zigbuild`); it links against glibc 2.31 so the

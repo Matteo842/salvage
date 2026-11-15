@@ -503,22 +503,62 @@ fn remove_all(bus: &Bus, tag: &str, dir: &Path) -> bool {
 const OLD: &str = "OLD";
 const PRE: &str = "prerelease";
 const LEGACY: &str = "latest";
-const OWNED_FILE: &str = ".salvage-releases.json";
+/// Where releases folders listed their own folders before 0.5: moved into
+/// [`owned_path`] on first sight.
+const OLD_OWNED_FILE: &str = ".salvage-releases.json";
 
-/// The release folders Salvage made, listed in `.salvage-releases.json` in
-/// the releases folder. In a folder the user picked, only these are ever moved
+/// One file for every repo, kept with the config: for each releases folder,
+/// the release folders in it that Salvage made.
+fn owned_path() -> PathBuf {
+    crate::model::config_path().with_file_name("releases.json")
+}
+
+/// Releases sync in parallel: one at a time reads and rewrites [`owned_path`].
+static OWNED_LOCK: Mutex<()> = Mutex::new(());
+
+fn read_owned(path: &Path) -> HashMap<String, Vec<String>> {
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// The release folders Salvage made, listed in [`owned_path`] under the
+/// releases folder. In a folder the user picked, only these are ever moved
 /// or deleted: anything else in there is left alone.
 struct Owned {
     dir: PathBuf,
+    /// The key of `dir` in [`owned_path`].
+    id: String,
     /// `Name-releases` under the backup folder is Salvage's as a whole.
     all: bool,
     list: Vec<String>,
 }
 
 impl Owned {
-    fn load(dir: &Path, all: bool) -> Self {
-        let list = std::fs::read_to_string(dir.join(OWNED_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        Self { dir: dir.to_path_buf(), all, list }
+    fn load(bus: &Bus, tag: &str, dir: &Path, all: bool) -> Self {
+        let id = dir.to_string_lossy().replace('\\', "/");
+        let list = {
+            let _guard = OWNED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            read_owned(&owned_path()).remove(&id).unwrap_or_default()
+        };
+        let mut owned = Self { dir: dir.to_path_buf(), id, all, list };
+        // The list of an older Salvage, in the folder itself: it joins the
+        // central one, then goes once that is written.
+        let old = dir.join(OLD_OWNED_FILE);
+        if let Some(found) = std::fs::read_to_string(&old).ok().and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()) {
+            for key in found {
+                if !owned.list.contains(&key) {
+                    owned.list.push(key);
+                }
+            }
+            match owned.save() {
+                Ok(()) => {
+                    if std::fs::remove_file(&old).is_ok() {
+                        bus.log(tag, LogKind::Info, t!("moved the list of {} into {}", "spostato l'elenco di {} in {}", old.display(), owned_path().display()));
+                    }
+                }
+                Err(e) => bus.log(tag, LogKind::Err, e),
+            }
+        }
+        owned
     }
 
     fn key(&self, path: &Path) -> Option<String> {
@@ -548,13 +588,29 @@ impl Owned {
         }
     }
 
-    fn save(&self) {
+    /// Rewrite this folder's entry, leaving the other folders' as they are.
+    /// A folder that is not there (a drive unplugged) keeps its entry.
+    fn save(&self) -> Result<(), String> {
         if !self.dir.is_dir() {
-            return;
+            return Ok(());
         }
-        if let Ok(text) = serde_json::to_string_pretty(&self.list) {
-            let _ = std::fs::write(self.dir.join(OWNED_FILE), text);
+        let _guard = OWNED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = owned_path();
+        let mut all = read_owned(&path);
+        if self.list.is_empty() {
+            all.remove(&self.id);
+        } else {
+            all.insert(self.id.clone(), self.list.clone());
         }
+        let fail = |e: std::io::Error| t!("cannot write {}: {e}", "non riesco a scrivere {}: {e}", path.display());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(fail)?;
+        }
+        let text = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
+        // Through a temp file, so a crash mid-write cannot lose the list.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text).map_err(fail)?;
+        std::fs::rename(&tmp, &path).map_err(fail)
     }
 }
 
@@ -688,7 +744,7 @@ fn archive(bus: &Bus, p: &Project, root: &Path, releases: &[Release]) -> Result<
     let (stable, pre) = pick(releases);
     let kept = stables(p, releases, p.keep());
     let dir = p.releases_dir(root);
-    let mut owned = Owned::load(&dir, p.release_dir.is_none());
+    let mut owned = Owned::load(bus, tag, &dir, p.release_dir.is_none());
     let (old, pre_dir, legacy) = (dir.join(OLD), dir.join(PRE), dir.join(LEGACY));
     let mut first_err = None;
 
@@ -740,7 +796,9 @@ fn archive(bus: &Bus, p: &Project, root: &Path, releases: &[Release]) -> Result<
         }
         None => {}
     }
-    owned.save();
+    if let Err(e) = owned.save() {
+        bus.log(tag, LogKind::Err, e);
+    }
     match first_err {
         Some(e) => Err(e),
         None => {
@@ -1007,6 +1065,36 @@ mod tests {
         assert_eq!(p.keep(), 1);
         p.keep = 200;
         assert_eq!(p.keep(), 10);
+    }
+
+    /// The only test that sets `SALVAGE_CONFIG`, so the others never see it.
+    #[test]
+    fn owned_list() {
+        let base = std::env::temp_dir().join(format!("salvage-owned-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("rel");
+        std::fs::create_dir_all(dir.join("OLD")).unwrap();
+        std::env::set_var("SALVAGE_CONFIG", base.join("cfg").join("config.json"));
+        let bus = Bus { tx: std::sync::mpsc::channel().0, ctx: eframe::egui::Context::default(), cancel: Default::default() };
+
+        // An older Salvage's list in the folder moves into the central file.
+        std::fs::write(dir.join(OLD_OWNED_FILE), r#"["v1"]"#).unwrap();
+        let mut owned = Owned::load(&bus, "t", &dir, false);
+        assert!(!dir.join(OLD_OWNED_FILE).exists());
+        assert!(owned.has(&dir.join("v1")));
+        assert!(!owned.has(&dir.join("mine")));
+
+        owned.forget(&dir.join("v1"));
+        owned.add(&dir.join("OLD").join("v1"));
+        owned.save().unwrap();
+        let again = Owned::load(&bus, "t", &dir, false);
+        assert_eq!(again.list, ["OLD/v1"]);
+        let central = read_owned(&owned_path());
+        assert_eq!(central.len(), 1);
+        assert!(owned_path().starts_with(base.join("cfg")));
+
+        std::env::remove_var("SALVAGE_CONFIG");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

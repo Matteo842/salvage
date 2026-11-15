@@ -180,22 +180,34 @@ impl Config {
     }
 }
 
+/// The folder of the running executable.
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf))
+}
+
+/// Portable mode: a file named `portable` (or `portable.txt`, as Explorer
+/// makes it) next to the executable. Then everything Salvage keeps for
+/// itself lives in that folder instead of the user's settings folder.
+pub fn portable_dir() -> Option<PathBuf> {
+    let dir = exe_dir()?;
+    ["portable", "portable.txt"].iter().any(|n| dir.join(n).is_file()).then_some(dir)
+}
+
 /// `SALVAGE_CONFIG` overrides the location (used for testing against a throwaway root).
+/// Everything else Salvage keeps for itself (lock, last scheduled run, release
+/// bookkeeping) goes in the same folder.
 pub fn config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("SALVAGE_CONFIG") {
         return PathBuf::from(p);
+    }
+    if let Some(dir) = portable_dir() {
+        return dir.join("config.json");
     }
     #[cfg(windows)]
     let (base, dir) = (std::env::var_os("APPDATA").map(PathBuf::from), "Salvage");
     #[cfg(not(windows))]
     let (base, dir) = (config_home(), "salvage");
-    let base = base
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|e| e.parent().map(Path::to_path_buf))
-        })
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = base.or_else(exe_dir).unwrap_or_else(|| PathBuf::from("."));
     base.join(dir).join("config.json")
 }
 

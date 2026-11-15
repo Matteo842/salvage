@@ -119,7 +119,8 @@ impl Bus {
     }
 }
 
-/// `git`, or `curl` for release files: both ship with what Salvage needs on Windows.
+/// `git`, or `curl` for release files. curl ships with Windows 10 and 11;
+/// Git does not, so it may be missing (see [`has_git`]).
 fn tool(program: &str, dir: Option<&Path>) -> Command {
     let mut c = Command::new(program);
     if let Some(d) = dir {
@@ -139,6 +140,119 @@ fn tool(program: &str, dir: Option<&Path>) -> Command {
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     c
+}
+
+/// Why `program` did not start, worded for a person.
+fn spawn_error(program: &str, e: &std::io::Error) -> String {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        t!("could not start {program}: {e}", "{program} non parte: {e}")
+    } else if program == "git" {
+        tr(
+            "Git is not installed: get it from git-scm.com, then restart Salvage",
+            "Git non è installato: scaricalo da git-scm.com, poi riavvia Salvage",
+        )
+        .into()
+    } else {
+        t!("{program} is not installed", "{program} non è installato")
+    }
+}
+
+/// Git is on the PATH. Found once per run: an install made while Salvage
+/// runs only shows up in a new process anyway.
+fn has_git() -> bool {
+    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| tool("git", None).arg("--version").output().is_ok_and(|o| o.status.success()))
+}
+
+/// What `git ls-remote` prints: one `hash<TAB>ref` per line. Without Git, an
+/// http(s) remote is asked with curl through git's own web protocol, so repos
+/// kept only for their release files work on a PC with no Git at all.
+fn ls_remote(bus: &Bus, tag: &str, url: &str, heads_only: bool, timeout: Duration) -> Done {
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if has_git() || !web {
+        let mut args = vec!["ls-remote"];
+        if heads_only {
+            args.push("--heads");
+        }
+        args.push(url);
+        return run(bus, tag, None, None, &args, Some(timeout), false);
+    }
+
+    let fail = |err: String| {
+        bus.log(tag, LogKind::Err, err.clone());
+        Done {
+            ok: false,
+            stdout: String::new(),
+            err,
+        }
+    };
+    let refs_url = format!("{}/info/refs?service=git-upload-pack", url.trim_end_matches('/'));
+    let secs = timeout.as_secs().to_string();
+    bus.log(tag, LogKind::Cmd, format!("curl {refs_url}"));
+    // Raw bytes, not `run_tool`: the answer is binary-framed and holds NULs.
+    let out = match tool("curl", None).args(["-sS", "-f", "-L", "--max-time", &secs, "-A", "git/2.0", &refs_url]).output() {
+        Ok(o) => o,
+        Err(e) => return fail(spawn_error("curl", &e)),
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return fail(err.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string());
+    }
+    let Some(refs) = web_refs(&out.stdout) else {
+        return fail(tr("the link does not answer like a git repository", "il link non risponde come un repository git").into());
+    };
+    let stdout = refs
+        .iter()
+        .filter(|(_, name)| !heads_only || name.starts_with("refs/heads/"))
+        .map(|(hash, name)| format!("{hash}\t{name}\n"))
+        .collect();
+    Done {
+        ok: true,
+        stdout,
+        err: String::new(),
+    }
+}
+
+/// Refs out of an `info/refs` answer. Smart servers frame each line as
+/// `<4 hex length><hash> <ref>[\0capabilities]\n`; old "dumb" ones send plain
+/// `<hash>\t<ref>` lines. `None` if it is neither.
+fn web_refs(body: &[u8]) -> Option<Vec<(String, String)>> {
+    let is_hash = |h: &str| matches!(h.len(), 40 | 64) && h.bytes().all(|b| b.is_ascii_hexdigit());
+
+    if body.starts_with(b"001e# service=") {
+        let mut refs = Vec::new();
+        let mut pos = 0;
+        while pos + 4 <= body.len() {
+            let len = usize::from_str_radix(std::str::from_utf8(&body[pos..pos + 4]).ok()?, 16).ok()?;
+            if len == 0 {
+                pos += 4; // flush
+                continue;
+            }
+            if len < 4 || pos + len > body.len() {
+                return None;
+            }
+            let line = &body[pos + 4..pos + len];
+            pos += len;
+            let line = line.split(|&b| b == 0).next().unwrap_or_default();
+            let line = String::from_utf8_lossy(line);
+            if let Some((hash, name)) = line.trim_end().split_once(' ') {
+                // An empty repo sends one `capabilities^{}` placeholder.
+                if is_hash(hash) && name != "capabilities^{}" {
+                    refs.push((hash.to_string(), name.to_string()));
+                }
+            }
+        }
+        return Some(refs);
+    }
+
+    let text = String::from_utf8_lossy(body);
+    let refs: Vec<_> = text
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(h, _)| is_hash(h))
+        .map(|(h, n)| (h.to_string(), n.trim().to_string()))
+        .collect();
+    (!refs.is_empty()).then_some(refs)
 }
 
 /// Quick silent query, e.g. reading a config value.
@@ -257,7 +371,7 @@ fn run_tool(
     let mut child = match cmd.args(args).spawn() {
         Ok(c) => c,
         Err(e) => {
-            let msg = t!("could not start {program}: {e}", "{program} non parte: {e}");
+            let msg = spawn_error(program, &e);
             bus.log(tag, LogKind::Err, msg.clone());
             return Done {
                 ok: false,
@@ -377,13 +491,18 @@ fn run_tool(
 fn humanize(err: &str) -> String {
     let e = err.trim();
     let low = e.to_lowercase();
-    if low.contains("repository not found") || low.contains("not found") && low.contains("repository") {
+    // `returned error: 401/404` is curl asking a remote without Git (see `ls_remote`).
+    if low.contains("repository not found")
+        || low.contains("not found") && low.contains("repository")
+        || low.contains("returned error: 401")
+        || low.contains("returned error: 404")
+    {
         tr("repository not found (removed or made private)", "repository non trovato (rimosso o reso privato)").into()
     } else if low.contains("could not resolve host") {
         tr("host unreachable (domain gone or no network)", "host non raggiungibile (dominio sparito o niente rete)").into()
     } else if low.contains("could not read username") || low.contains("authentication failed") {
         tr("server asks for a login (removed or made private)", "il server chiede un login (rimosso o reso privato)").into()
-    } else if low.contains("failed to connect") || low.contains("connection timed out") || low.contains("connection refused") {
+    } else if low.contains("failed to connect") || low.contains("connection timed out") || low.contains("operation timed out") || low.contains("connection refused") {
         tr("server does not answer", "il server non risponde").into()
     } else if is_transient(e) {
         t!("the connection broke {NET_TRIES} times in a row, the next sync tries again", "la connessione si è interrotta {NET_TRIES} volte di fila, la prossima sincronizzazione riprova")
@@ -416,7 +535,7 @@ pub fn check(bus: &Bus, p: &Project, root: &Path) -> Check {
     let work = p.work_dir(root);
     let cloned = is_repo(&mirror) || is_repo(&work) || (p.releases && p.releases_dir(root).is_dir());
 
-    let done = run(bus, tag, None, None, &["ls-remote", &p.url], Some(Duration::from_secs(40)), false);
+    let done = ls_remote(bus, tag, &p.url, false, Duration::from_secs(40));
     if !done.ok {
         let error = humanize(&done.err);
         bus.log(tag, LogKind::Err, t!("no answer: {error}", "non risponde: {error}"));
@@ -597,7 +716,7 @@ pub fn sync(bus: &Bus, p: &Project, root: &Path, fresh_work: bool) -> Result<(),
 
 /// One-off probe for the add/edit dialogs.
 pub fn test(bus: &Bus, url: &str) {
-    let done = run(bus, tr("probe", "verifica"), None, None, &["ls-remote", "--heads", url], Some(Duration::from_secs(30)), false);
+    let done = ls_remote(bus, tr("probe", "verifica"), url, true, Duration::from_secs(30));
     let (ok, detail) = if done.ok {
         (true, t!("answers, {}", "risponde, {}", branches(done.stdout.lines().count())))
     } else {
@@ -657,7 +776,7 @@ pub fn scan(root: &Path) -> Vec<Found> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_transient;
+    use super::{is_transient, web_refs};
 
     #[test]
     fn transient() {
@@ -667,5 +786,29 @@ mod tests {
         assert!(!is_transient("remote: Repository not found."));
         assert!(!is_transient("fatal: Not possible to fast-forward, aborting."));
         assert!(!is_transient("fatal: could not read Username for 'https://github.com': terminal prompts disabled"));
+    }
+
+    #[test]
+    fn web_refs_reads_smart_and_dumb_answers() {
+        let h1 = "b".repeat(40);
+        let h2 = "a".repeat(40);
+        let pkt = |s: &str| format!("{:04x}{s}", s.len() + 4);
+        let smart = format!(
+            "{}0000{}{}0000",
+            pkt("# service=git-upload-pack\n"),
+            pkt(&format!("{h1} HEAD\0multi_ack symref=HEAD:refs/heads/main\n")),
+            pkt(&format!("{h2} refs/heads/main\n")),
+        );
+        let refs = web_refs(smart.as_bytes()).unwrap();
+        assert_eq!(refs, vec![(h1.clone(), "HEAD".to_string()), (h2.clone(), "refs/heads/main".to_string())]);
+
+        let caps = format!("{} capabilities^{{}}\0agent=x\n", "0".repeat(40));
+        let empty = format!("{}0000{}0000", pkt("# service=git-upload-pack\n"), pkt(&caps));
+        assert_eq!(web_refs(empty.as_bytes()).unwrap(), vec![]);
+
+        let dumb = format!("{h2}\trefs/heads/main\n");
+        assert_eq!(web_refs(dumb.as_bytes()).unwrap(), vec![(h2, "refs/heads/main".to_string())]);
+
+        assert!(web_refs(b"<!DOCTYPE html><html></html>").is_none());
     }
 }
