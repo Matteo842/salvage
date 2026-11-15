@@ -107,6 +107,13 @@ struct Dialog {
     work: bool,
     releases: bool,
     platforms: Vec<String>,
+    keep: u8,
+    /// Empty: `Name-releases` under the backup folder.
+    release_dir: String,
+    /// The file the auto-updater follows: its key and its name.
+    upd_file: Option<(String, String)>,
+    upd_dir: String,
+    upd_pre: bool,
     choices: Choices,
     fresh: bool,
     old_urls: Vec<String>,
@@ -124,6 +131,34 @@ struct Dialog {
 }
 
 impl Dialog {
+    /// Why the repo's choices cannot be saved, if they cannot.
+    fn check_keep(&self) -> Option<String> {
+        if !self.mirror && !self.work && !self.releases && self.upd_file.is_none() {
+            Some(tr("Pick at least one thing to keep.", "Scegli almeno una cosa da tenere.").into())
+        } else if self.releases && self.platforms.is_empty() {
+            Some(tr("Pick at least one system for the release files.", "Scegli almeno un sistema per i file delle release.").into())
+        } else if self.upd_file.is_some() && self.upd_dir.trim().is_empty() {
+            Some(tr("Pick the folder to keep updated.", "Scegli la cartella da tenere aggiornata.").into())
+        } else {
+            None
+        }
+    }
+
+    /// Copy the release and auto-update choices into the repo.
+    fn apply(&self, p: &mut Project) {
+        p.releases = self.releases;
+        p.platforms = self.platforms.clone();
+        p.keep = self.keep;
+        let dir = self.release_dir.trim();
+        p.release_dir = (!dir.is_empty()).then(|| PathBuf::from(dir));
+        p.update = self.upd_file.as_ref().map(|(file, name)| model::Update {
+            dir: PathBuf::from(self.upd_dir.trim()),
+            file: file.clone(),
+            name: name.clone(),
+            pre: self.upd_pre,
+        });
+    }
+
     fn blank(kind: Kind) -> Self {
         Self {
             kind,
@@ -135,6 +170,11 @@ impl Dialog {
             work: true,
             releases: false,
             platforms: Vec::new(),
+            keep: 1,
+            release_dir: String::new(),
+            upd_file: None,
+            upd_dir: String::new(),
+            upd_pre: false,
             choices: Choices::None,
             fresh: false,
             old_urls: Vec::new(),
@@ -159,8 +199,16 @@ enum Outcome {
     Submit,
     Remove,
     Probe,
-    Browse,
+    Browse(Folder),
     Import,
+}
+
+/// Which folder a "browse" button picks.
+#[derive(Clone, Copy)]
+enum Folder {
+    Root,
+    Releases,
+    Update,
 }
 
 struct Shot {
@@ -577,6 +625,13 @@ impl App {
         d.work = p.work;
         d.releases = p.releases;
         d.platforms = p.platforms.clone();
+        d.keep = p.keep() as u8;
+        d.release_dir = p.release_dir.as_ref().map(|r| r.display().to_string()).unwrap_or_default();
+        if let Some(u) = &p.update {
+            d.upd_file = Some((u.file.clone(), u.name.clone()));
+            d.upd_dir = u.dir.display().to_string();
+            d.upd_pre = u.pre;
+        }
         d.old_urls = p.old_urls.clone();
         self.dialog = Some(d);
     }
@@ -606,15 +661,12 @@ impl App {
                     d.error = tr("The folder name is missing.", "Manca il nome della cartella.").into();
                 } else if self.cfg.has_name(&name) {
                     d.error = t!("There is already a repo called {name}: pick another name.", "C'è già un repo chiamato {name}: scegli un altro nome.");
-                } else if !d.mirror && !d.work && !d.releases {
-                    d.error = tr("Pick at least one thing to keep.", "Scegli almeno una cosa da tenere.").into();
-                } else if d.releases && d.platforms.is_empty() {
-                    d.error = tr("Pick at least one system for the release files.", "Scegli almeno un sistema per i file delle release.").into();
+                } else if let Some(e) = d.check_keep() {
+                    d.error = e;
                 } else {
                     let id = self.cfg.add(name, url, d.mirror, d.work);
                     if let Some(p) = self.cfg.projects.iter_mut().find(|p| p.id == id) {
-                        p.releases = d.releases;
-                        p.platforms = d.platforms.clone();
+                        d.apply(p);
                     }
                     self.save();
                     self.queue_sync(id, false);
@@ -628,19 +680,17 @@ impl App {
                     d.error = tr("The repo link is missing.", "Manca il link del repo.").into();
                     return false;
                 }
-                if !d.mirror && !d.work && !d.releases {
-                    d.error = tr("Pick at least one thing to keep.", "Scegli almeno una cosa da tenere.").into();
-                    return false;
-                }
-                if d.releases && d.platforms.is_empty() {
-                    d.error = tr("Pick at least one system for the release files.", "Scegli almeno un sistema per i file delle release.").into();
+                if let Some(e) = d.check_keep() {
+                    d.error = e;
                     return false;
                 }
                 let Some(p) = self.cfg.projects.iter_mut().find(|p| p.id == id) else {
                     return true;
                 };
                 let moved = url != p.url;
-                let changed = moved || d.fresh || d.mirror != p.mirror || d.work != p.work || d.releases != p.releases || (d.releases && d.platforms != p.platforms);
+                // What a sync would do differently.
+                let plan = |p: &Project| (p.mirror, p.work, p.releases, p.platforms.clone(), p.keep, p.release_dir.clone(), p.update.clone());
+                let before = plan(p);
                 if moved {
                     let old = std::mem::replace(&mut p.url, url.clone());
                     p.old_urls.retain(|u| *u != url && *u != old);
@@ -653,8 +703,8 @@ impl App {
                 }
                 p.mirror = d.mirror;
                 p.work = d.work;
-                p.releases = d.releases;
-                p.platforms = d.platforms.clone();
+                d.apply(p);
+                let changed = moved || d.fresh || before != plan(p);
                 self.save();
                 if changed {
                     self.queue_sync(id, d.fresh);
@@ -719,10 +769,11 @@ impl App {
         let body = Rect::from_min_max(pos2(screen.left(), screen.top() + TITLE_H + 1.0), screen.max);
         let moved = d.kind != Kind::Add && d.url.trim() != d.original_url;
         let height = match d.kind {
-            Kind::Add => 336.0 + releases_h(&d),
-            Kind::Edit(_) => 384.0 + releases_h(&d) + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
+            Kind::Add => 336.0 + releases_h(&d) + update_h(&d),
+            Kind::Edit(_) => 384.0 + releases_h(&d) + update_h(&d) + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
             Kind::Settings => 434.0,
         };
+        let height = height.min(body.height() - 24.0);
 
         egui::Area::new(Id::new("dialog"))
             .order(Order::Foreground)
@@ -745,87 +796,96 @@ impl App {
                     ui.label(egui::RichText::new(text).font(mono(11.5)).color(col));
                 };
 
-                match d.kind {
-                    Kind::Add => {
-                        ui.label(egui::RichText::new(tr("Add a repo", "Aggiungi un repo")).font(mono(16.0)).color(FOAM()));
-                        note(&mut ui, tr("Paste the git link. GitHub, GitLab, Gitea or any other host works.", "Incolla il link git. Va bene GitHub, GitLab, Gitea o qualsiasi altro host."), KELP());
-                        ui.add_space(6.0);
-                        let r = field(&mut ui, Id::new("dlg_url"), &mut d.url, tr("https://host/user/repo", "https://host/utente/repo"), w);
-                        if d.focus {
-                            r.request_focus();
-                            d.focus = false;
-                        }
-                        if r.changed() {
-                            if !d.name_touched {
-                                d.name = name_from_url(&d.url);
+                // Everything above the error line and the buttons scrolls when the
+                // window is too short for it.
+                let content = Rect::from_min_max(inner.min, pos2(inner.right() + 16.0, inner.bottom() - 66.0));
+                let mut body_ui = ui.new_child(UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
+                egui::ScrollArea::vertical().id_salt("dlg_scroll").auto_shrink([false; 2]).show(&mut body_ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    match d.kind {
+                        Kind::Add => {
+                            ui.label(egui::RichText::new(tr("Add a repo", "Aggiungi un repo")).font(mono(16.0)).color(FOAM()));
+                            note(ui, tr("Paste the git link. GitHub, GitLab, Gitea or any other host works.", "Incolla il link git. Va bene GitHub, GitLab, Gitea o qualsiasi altro host."), KELP());
+                            ui.add_space(6.0);
+                            let r = field(ui, Id::new("dlg_url"), &mut d.url, tr("https://host/user/repo", "https://host/utente/repo"), w);
+                            if d.focus {
+                                r.request_focus();
+                                d.focus = false;
                             }
-                            d.probe = Probe::None;
+                            if r.changed() {
+                                if !d.name_touched {
+                                    d.name = name_from_url(&d.url);
+                                }
+                                d.probe = Probe::None;
+                            }
+                            if field(ui, Id::new("dlg_name"), &mut d.name, tr("folder name", "nome della cartella"), w).changed() {
+                                d.name_touched = true;
+                            }
+                            ui.add_space(2.0);
+                            toggle(ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
+                            toggle(ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
+                            releases_ui(ui, &mut d, w, &mut out);
+                            update_ui(ui, &mut d, w, &mut out);
                         }
-                        if field(&mut ui, Id::new("dlg_name"), &mut d.name, tr("folder name", "nome della cartella"), w).changed() {
-                            d.name_touched = true;
-                        }
-                        ui.add_space(2.0);
-                        toggle(&mut ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
-                        toggle(&mut ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
-                        releases_ui(&mut ui, &mut d, w);
-                    }
-                    Kind::Edit(_) => {
-                        ui.label(egui::RichText::new(&d.name).font(mono(16.0)).color(FOAM()));
-                        note(&mut ui, tr("If the repo moved, paste the new link here. The folders on disk stay the same.", "Se il repo si è spostato, incolla qui il link nuovo. Le cartelle su disco restano le stesse."), KELP());
-                        ui.add_space(6.0);
-                        if field(&mut ui, Id::new("dlg_url"), &mut d.url, tr("https://host/user/repo", "https://host/utente/repo"), w).changed() {
-                            d.probe = Probe::None;
-                        }
-                        if !d.old_urls.is_empty() {
-                            note(&mut ui, tr("links used before (click to restore)", "link usati prima (clicca per rimetterlo)"), DEEP());
-                            for (i, old) in d.old_urls.clone().iter().take(4).enumerate() {
-                                let (r, _) = ui.allocate_exact_size(vec2(w, 12.0), Sense::hover());
-                                let text = fit(&short_url(old), 68);
-                                if widgets::link(&mut ui, Id::new(("old_url", i)), r.min, text, 11.5, KELP()).clicked() {
-                                    d.url = old.clone();
-                                    d.probe = Probe::None;
+                        Kind::Edit(_) => {
+                            ui.label(egui::RichText::new(&d.name).font(mono(16.0)).color(FOAM()));
+                            note(ui, tr("If the repo moved, paste the new link here. The folders on disk stay the same.", "Se il repo si è spostato, incolla qui il link nuovo. Le cartelle su disco restano le stesse."), KELP());
+                            ui.add_space(6.0);
+                            if field(ui, Id::new("dlg_url"), &mut d.url, tr("https://host/user/repo", "https://host/utente/repo"), w).changed() {
+                                d.probe = Probe::None;
+                            }
+                            if !d.old_urls.is_empty() {
+                                note(ui, tr("links used before (click to restore)", "link usati prima (clicca per rimetterlo)"), DEEP());
+                                for (i, old) in d.old_urls.clone().iter().take(4).enumerate() {
+                                    let (r, _) = ui.allocate_exact_size(vec2(w, 12.0), Sense::hover());
+                                    let text = fit(&short_url(old), 68);
+                                    if widgets::link(ui, Id::new(("old_url", i)), r.min, text, 11.5, KELP()).clicked() {
+                                        d.url = old.clone();
+                                        d.probe = Probe::None;
+                                    }
                                 }
                             }
-                        }
-                        ui.add_space(2.0);
-                        toggle(&mut ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
-                        toggle(&mut ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
-                        releases_ui(&mut ui, &mut d, w);
-                        if d.work {
-                            toggle(&mut ui, &mut d.fresh, tr("re-clone the working copy from scratch (the old one stays as .old)", "riscarica la copia di lavoro da zero (la vecchia resta come .old)"));
-                        }
-                        if moved {
-                            note(&mut ui, tr("The current link moves to the history. Mirror and working copy will follow the new one.", "Il link attuale passa nello storico. Mirror e copia di lavoro seguiranno quello nuovo."), FLARE());
-                        }
-                    }
-                    Kind::Settings => {
-                        ui.label(egui::RichText::new(tr("Settings", "Impostazioni")).font(mono(16.0)).color(FOAM()));
-                        note(&mut ui, tr("Folder where mirrors and working copies live.", "Cartella dove vivono mirror e copie di lavoro."), KELP());
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            field(ui, Id::new("dlg_root"), &mut d.root, "D:\\backup", w - 108.0);
-                            if button(ui, Some(Icon::Folder), tr("browse", "sfoglia"), Tone::Quiet).clicked() {
-                                out = Outcome::Browse;
+                            ui.add_space(2.0);
+                            toggle(ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
+                            toggle(ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
+                            releases_ui(ui, &mut d, w, &mut out);
+                            update_ui(ui, &mut d, w, &mut out);
+                            if d.work {
+                                toggle(ui, &mut d.fresh, tr("re-clone the working copy from scratch (the old one stays as .old)", "riscarica la copia di lavoro da zero (la vecchia resta come .old)"));
                             }
-                        });
-                        if button(&mut ui, Some(Icon::Scan), tr("find repos already in this folder", "cerca repo già presenti in questa cartella"), Tone::Quiet).clicked() {
-                            out = Outcome::Import;
+                            if moved {
+                                note(ui, tr("The current link moves to the history. Mirror and working copy will follow the new one.", "Il link attuale passa nello storico. Mirror e copia di lavoro seguiranno quello nuovo."), FLARE());
+                            }
                         }
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            toggle(ui, &mut d.auto, tr("sync everything automatically, every", "sincronizza tutto da solo, ogni"));
-                            widgets::interval_stepper(ui, &mut d.hours);
-                        });
-                        toggle(&mut ui, &mut d.task, &headless::toggle_text());
-                        toggle(&mut ui, &mut d.check_start, tr("check the links at startup", "controlla i link all'avvio"));
-                        note(&mut ui, &headless::note_text(), DEEP());
-                        ui.add_space(6.0);
-                        if toggle(&mut ui, &mut d.oled, tr("OLED theme: pure black and white", "tema OLED: solo bianco e nero")).changed() {
-                            theme::set_oled(d.oled);
-                            apply(ctx);
+                        Kind::Settings => {
+                            ui.label(egui::RichText::new(tr("Settings", "Impostazioni")).font(mono(16.0)).color(FOAM()));
+                            note(ui, tr("Folder where mirrors and working copies live.", "Cartella dove vivono mirror e copie di lavoro."), KELP());
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                field(ui, Id::new("dlg_root"), &mut d.root, "D:\\backup", w - 108.0);
+                                if button(ui, Some(Icon::Folder), tr("browse", "sfoglia"), Tone::Quiet).clicked() {
+                                    out = Outcome::Browse(Folder::Root);
+                                }
+                            });
+                            if button(ui, Some(Icon::Scan), tr("find repos already in this folder", "cerca repo già presenti in questa cartella"), Tone::Quiet).clicked() {
+                                out = Outcome::Import;
+                            }
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                toggle(ui, &mut d.auto, tr("sync everything automatically, every", "sincronizza tutto da solo, ogni"));
+                                widgets::interval_stepper(ui, &mut d.hours);
+                            });
+                            toggle(ui, &mut d.task, &headless::toggle_text());
+                            toggle(ui, &mut d.check_start, tr("check the links at startup", "controlla i link all'avvio"));
+                            note(ui, &headless::note_text(), DEEP());
+                            ui.add_space(6.0);
+                            if toggle(ui, &mut d.oled, tr("OLED theme: pure black and white", "tema OLED: solo bianco e nero")).changed() {
+                                theme::set_oled(d.oled);
+                                apply(ctx);
+                            }
                         }
                     }
-                }
+                });
 
                 // Probe result and validation errors sit just above the buttons.
                 let line_y = inner.bottom() - 58.0;
@@ -932,9 +992,15 @@ impl App {
                 }
                 self.dialog = Some(d);
             }
-            Outcome::Browse => {
-                if let Some(dir) = rfd::FileDialog::new().set_directory(d.root.trim()).pick_folder() {
-                    d.root = dir.display().to_string();
+            Outcome::Browse(which) => {
+                let text = match which {
+                    Folder::Root => &mut d.root,
+                    Folder::Releases => &mut d.release_dir,
+                    Folder::Update => &mut d.upd_dir,
+                };
+                let start = if text.trim().is_empty() { self.cfg.root.display().to_string() } else { text.trim().to_string() };
+                if let Some(dir) = rfd::FileDialog::new().set_directory(start).pick_folder() {
+                    *text = dir.display().to_string();
                 }
                 self.dialog = Some(d);
             }
@@ -1469,9 +1535,88 @@ impl eframe::App for App {
     }
 }
 
-/// Dialog height taken by the release files row and the line under it.
-fn releases_h(_d: &Dialog) -> f32 {
-    80.0
+/// Dialog height taken by the release files rows and the line under them.
+fn releases_h(d: &Dialog) -> f32 {
+    if d.releases {
+        156.0
+    } else {
+        80.0
+    }
+}
+
+/// Dialog height taken by the auto-update rows.
+fn update_h(d: &Dialog) -> f32 {
+    if d.upd_file.is_some() {
+        176.0
+    } else {
+        40.0
+    }
+}
+
+/// A labelled folder field with a browse button.
+#[allow(clippy::too_many_arguments)]
+fn folder_row(ui: &mut Ui, id: &str, label: &str, text: &mut String, hint: &str, w: f32, which: Folder, out: &mut Outcome) {
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
+        ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, label, mono(12.5), FOAM());
+        field(ui, Id::new(id), text, hint, w - 158.0 - 40.0);
+        let (b, _) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
+        if widgets::icon_button_at(ui, b, Id::new(id).with("browse"), Icon::Folder, tr("browse", "sfoglia"), FOAM()).clicked() {
+            *out = Outcome::Browse(which);
+        }
+    });
+}
+
+/// Auto-update: one release file unpacked over a folder at every sync.
+fn update_ui(ui: &mut Ui, d: &mut Dialog, w: f32, out: &mut Outcome) {
+    let off = tr("off", "spento");
+    let mut items: Vec<(Option<(String, String)>, widgets::Pick)> = vec![(
+        None,
+        widgets::Pick {
+            label: off.into(),
+            detail: tr("nothing is unpacked", "non si estrae niente").into(),
+        },
+    )];
+    if let Choices::Ready(_, list) = &d.choices {
+        for c in list {
+            for (name, key) in c.files.iter().zip(&c.keys) {
+                let how = if crate::extract::kind(name).is_some() {
+                    tr("unpacked over the folder", "estratto sopra la cartella")
+                } else {
+                    tr("copied into the folder", "copiato nella cartella")
+                };
+                items.push((Some((key.clone(), name.clone())), widgets::Pick { label: name.clone(), detail: format!("{}, {how}", c.platform.label()) }));
+            }
+        }
+    } else if let Some(f) = &d.upd_file {
+        // List not there (yet): still offer what is saved, so it can be kept or turned off.
+        items.push((Some(f.clone()), widgets::Pick { label: f.1.clone(), detail: String::new() }));
+    }
+
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
+        ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, tr("auto-update", "aggiorna da solo"), mono(12.5), FOAM());
+        let shown = d.upd_file.as_ref().map_or(off.to_string(), |f| fit(&f.1, 46));
+        let pick_items: Vec<widgets::Pick> = items.iter().map(|(_, p)| widgets::Pick { label: p.label.clone(), detail: p.detail.clone() }).collect();
+        picked = widgets::dropdown(ui, Id::new("dlg_update"), &shown, w - 158.0, &pick_items);
+    });
+    if let Some(i) = picked {
+        d.upd_file = items[i].0.clone();
+    }
+    if d.upd_file.is_none() {
+        return;
+    }
+    folder_row(ui, "dlg_upd_dir", tr("into folder", "nella cartella"), &mut d.upd_dir, tr("the program's folder", "la cartella del programma"), w, Folder::Update, out);
+    toggle(ui, &mut d.upd_pre, tr("follow pre-releases too", "segui anche le pre-release"));
+    ui.label(
+        egui::RichText::new(tr(
+            "At every sync the newest build is unpacked over this folder. Files that are only in the folder (saves, settings) stay. If the program is open, the update waits for the next sync.",
+            "A ogni sincronizzazione l'ultima build viene estratta sopra questa cartella. I file che ci sono solo lì (salvataggi, impostazioni) restano. Se il programma è aperto, l'aggiornamento aspetta la sincronizzazione dopo.",
+        ))
+        .font(mono(11.5))
+        .color(DEEP()),
+    );
 }
 
 /// What the release dropdown shows as chosen.
@@ -1495,7 +1640,7 @@ fn releases_shown(d: &Dialog) -> String {
 }
 
 /// Release files: a dropdown with only the systems the newest release has files for.
-fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32) {
+fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32, out: &mut Outcome) {
     // Each entry: the platforms it saves (`None` turns release files off), and how it reads.
     let mut items: Vec<(Option<Vec<String>>, widgets::Pick)> = vec![(
         None,
@@ -1539,16 +1684,41 @@ fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32) {
             }
         }
     }
+    if d.releases {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(150.0, 28.0), Sense::hover());
+            ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, tr("releases to keep", "release da tenere"), mono(12.5), FOAM());
+            widgets::count_stepper(ui, Id::new("dlg_keep"), &mut d.keep, 1, model::KEEP_MAX, tr("fewer", "meno"), tr("more", "di più"));
+        });
+        folder_row(
+            ui,
+            "dlg_release_dir",
+            tr("in folder", "nella cartella"),
+            &mut d.release_dir,
+            tr("empty: Name-releases in the backup folder", "vuoto: Name-releases nella cartella dei backup"),
+            w,
+            Folder::Releases,
+            out,
+        );
+    }
 
     let (text, col) = match &d.choices {
         Choices::Loading(_) => (tr("reading the releases...", "leggo le release...").to_string(), KELP()),
         Choices::Fail(_, e) => (e.clone(), if d.releases { WRECK() } else { DEEP() }),
         _ if d.releases => (
-            tr(
-                "Only the newest release is kept (latest/) and the newest pre-release (prerelease/). A new one is checked with sha256 before the old one is deleted.",
-                "Si tiene solo l'ultima release (latest/) e l'ultima pre-release (prerelease/). La nuova viene controllata con sha256 prima di cancellare la vecchia.",
-            )
-            .to_string(),
+            if d.keep <= 1 {
+                tr(
+                    "The newest release goes in <tag>/, the newest pre-release in prerelease/. A new one is checked with sha256 before the old one is deleted.",
+                    "L'ultima release va in <tag>/, l'ultima pre-release in prerelease/. La nuova viene controllata con sha256 prima di cancellare la vecchia.",
+                )
+                .to_string()
+            } else {
+                t!(
+                    "The newest release goes in <tag>/, the {} before it in OLD/, the newest pre-release in prerelease/. When a new one passes its sha256 check, the oldest is deleted.",
+                    "L'ultima release va in <tag>/, le {} prima in OLD/, l'ultima pre-release in prerelease/. Quando una nuova passa il controllo sha256, la più vecchia viene cancellata.",
+                    d.keep - 1
+                )
+            },
             DEEP(),
         ),
         Choices::None => (String::new(), DEEP()),

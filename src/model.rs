@@ -10,6 +10,13 @@ fn yes() -> bool {
     true
 }
 
+fn one() -> u8 {
+    1
+}
+
+/// How many stable releases a repo can keep at most.
+pub const KEEP_MAX: u8 = 10;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Project {
     pub id: u64,
@@ -36,6 +43,29 @@ pub struct Project {
     /// `macos`, `other` (see [`crate::releases::platform`]).
     #[serde(default)]
     pub platforms: Vec<String>,
+    /// How many stable releases to keep, newest first (1 to [`KEEP_MAX`]).
+    #[serde(default = "one")]
+    pub keep: u8,
+    /// Where the release files go instead of `Name-releases` under the backup folder.
+    #[serde(default)]
+    pub release_dir: Option<PathBuf>,
+    /// Keep one release file unpacked into a folder, always on the newest build.
+    #[serde(default)]
+    pub update: Option<Update>,
+}
+
+/// The auto-updater of one repo: a release file unpacked over a folder.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Update {
+    pub dir: PathBuf,
+    /// The file's name with the version taken out (see [`crate::releases::file_key`]),
+    /// so the same file is found in the next release.
+    pub file: String,
+    /// The file's full name when it was picked, for the dialog.
+    pub name: String,
+    /// Follow pre-releases too, not only stable releases.
+    #[serde(default)]
+    pub pre: bool,
 }
 
 impl Project {
@@ -47,8 +77,15 @@ impl Project {
         root.join(&self.name)
     }
 
+    /// Where the release files are kept: the folder picked for this repo, or
+    /// `Name-releases` under the backup folder.
     pub fn releases_dir(&self, root: &Path) -> PathBuf {
-        root.join(format!("{}-releases", self.name))
+        self.release_dir.clone().unwrap_or_else(|| root.join(format!("{}-releases", self.name)))
+    }
+
+    /// Stable releases to keep, clamped so a hand-edited config stays sane.
+    pub fn keep(&self) -> usize {
+        self.keep.clamp(1, KEEP_MAX) as usize
     }
 }
 
@@ -120,6 +157,9 @@ impl Config {
             old_urls: Vec::new(),
             releases: false,
             platforms: Vec::new(),
+            keep: 1,
+            release_dir: None,
+            update: None,
         });
         id
     }

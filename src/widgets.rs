@@ -228,6 +228,24 @@ pub fn interval_stepper(ui: &mut Ui, hours: &mut f32) {
         .text(rect.center(), Align2::CENTER_CENTER, hours_label(*hours), mono(12.5), FOAM());
 }
 
+/// Pick a whole number between `min` and `max`, one step at a time.
+pub fn count_stepper(ui: &mut Ui, id: Id, value: &mut u8, min: u8, max: u8, less: &str, more: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(96.0, 28.0), Sense::hover());
+    ui.painter()
+        .rect(rect, 2, alpha(ABYSS(), 0.6), Stroke::new(1.0, LINE()), StrokeKind::Inside);
+    let left = Rect::from_min_size(rect.min, vec2(28.0, 28.0));
+    let right = Rect::from_min_size(pos2(rect.right() - 28.0, rect.top()), vec2(28.0, 28.0));
+    let dim = |on: bool| if on { FOAM() } else { DEEP() };
+    if icon_button_at(ui, left, id.with("less"), Icon::Minus, less, dim(*value > min)).clicked() && *value > min {
+        *value -= 1;
+    }
+    if icon_button_at(ui, right, id.with("more"), Icon::Plus, more, dim(*value < max)).clicked() && *value < max {
+        *value += 1;
+    }
+    ui.painter()
+        .text(rect.center(), Align2::CENTER_CENTER, value.to_string(), mono(12.5), FOAM());
+}
+
 /// Single-line text field with our own frame.
 pub fn field(ui: &mut Ui, id: Id, text: &mut String, hint: &str, width: f32) -> Response {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());

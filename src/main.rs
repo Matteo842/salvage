@@ -4,6 +4,7 @@
 mod lang;
 
 mod app;
+mod extract;
 mod git;
 mod headless;
 mod icon;

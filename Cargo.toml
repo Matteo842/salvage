@@ -1,6 +1,6 @@
 [package]
 name = "salvage"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Keeps mirrors and working copies of git repos that might vanish up to date"
 license = "MIT"
@@ -13,6 +13,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.10"
+zip = { version = "9.6.0", default-features = false, features = ["deflate-flate2", "deflate64", "lzma", "xz"] }
+sevenz-rust2 = { version = "0.20.2", default-features = false, features = ["util"] }
+tar = "0.4.46"
+flate2 = "1.1.11"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "optimization"] }
 
 # winit needs a display backend on Linux; Windows ignores these.
 [target.'cfg(target_os = "linux")'.dependencies]

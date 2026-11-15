@@ -24,11 +24,19 @@ everything, and you can point the backup at the new link in two clicks.
   files menu: it lists only the ones the newest release has builds for
   (Windows, Linux, Android, macOS), or all of them. Salvage tells which file is
   for which system from its name and extension.
-  Salvage keeps the newest release and the newest pre-release. When a new one
-  comes out it is downloaded and checked against its sha256 (or its size, when
-  the host publishes no hash) before the old one is deleted. Works with GitHub,
+  Salvage keeps the newest release (or the newest 2 to 10, you choose: the
+  older ones go in `OLD/`) and the newest pre-release. When a new one comes out
+  it is downloaded and checked against its sha256 (or its size, when the host
+  publishes no hash) before the oldest one is deleted. Each repo can put its
+  releases in a folder of its own instead of the backup folder; in there
+  Salvage only ever moves or deletes the folders it made. Works with GitHub,
   GitLab and Gitea/Forgejo. You can keep only the releases, without mirror or
   working copy.
+- **Keeps a program up to date.** Pick one release file and a folder: at every
+  sync the newest build is unpacked over it (zip, 7z, tar.gz, tar.xz; any other
+  file is copied as it is). Files that are only in the folder, like saves and
+  settings, stay. If the program is running, nothing is touched and the update
+  waits for the next sync. Stable releases only, or pre-releases too.
 - **Follows a repo that moves.** Click the pencil, paste the new link. The
   folders on disk stay the same and the old link is kept in a history.
 - **Never deletes your backups.** Removing a repo from the list leaves its files.
@@ -44,9 +52,10 @@ On disk, under the backup folder you choose:
 ```
 Name-mirror.git/   bare mirror: all branches, all tags
 Name/              working copy, submodules included
-Name-releases/
-  latest/<tag>/      files of the newest release
-  prerelease/<tag>/  files of the newest pre-release, if newer than that
+Name-releases/       (or the folder picked for the repo)
+  <tag>/             files of the newest release
+  OLD/<tag>/         the releases before it, if you keep more than one
+  prerelease/<tag>/  files of the newest pre-release, if newer than those
 ```
 
 Repos already in that folder are found and added on first run.

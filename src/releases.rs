@@ -1,10 +1,16 @@
 //! Files attached to a repo's releases (builds, installers), read from the
 //! host's web API and downloaded with `curl`, which ships with Windows 10 and 11.
 //!
-//! Only the newest release is kept, in `Name-releases/latest/<tag>/`, and the
-//! newest pre-release when it is newer than that, in `Name-releases/prerelease/<tag>/`.
+//! The newest stable releases are kept, as many as the repo asks for (one by
+//! default, see [`Project::keep`]): the newest in `<dir>/<tag>/`, the older ones
+//! in `<dir>/OLD/<tag>/`, and the newest pre-release when it is newer than
+//! those in `<dir>/prerelease/<tag>/`. `<dir>` is `Name-releases` under the
+//! backup folder, or a folder picked for the repo.
 //! A new release is downloaded and checked (sha256 when the host publishes it,
-//! size otherwise) before the old one is deleted.
+//! size otherwise) before an old one is deleted.
+//!
+//! The auto-updater follows one release file instead and unpacks each new
+//! build over a folder (see [`crate::extract`]).
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -12,12 +18,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::git::{curl, stopped_msg, Bus, Event, LogKind};
 use crate::lang::tr;
-use crate::model::{sanitize_name, Project};
+use crate::extract;
+use crate::model::{sanitize_name, Project, Update};
 
 /// Saved in a project's platforms: every file, whatever system it is for.
 pub const ALL: &str = "all";
@@ -115,6 +123,8 @@ pub fn platform(name: &str) -> Option<Platform> {
 pub struct Choice {
     pub platform: Platform,
     pub files: Vec<String>,
+    /// For each file, its name without the version (see [`file_key`]).
+    pub keys: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -280,7 +290,7 @@ fn pick(releases: &[Release]) -> (Option<&Release>, Option<&Release>) {
 pub fn list_files(bus: &Bus, url: &str) {
     let result = fetch(bus, tr("releases", "release"), url).and_then(|releases| {
         let (stable, pre) = pick(&releases);
-        let mut out: Vec<Choice> = Platform::ALL.iter().map(|&platform| Choice { platform, files: Vec::new() }).collect();
+        let mut out: Vec<Choice> = Platform::ALL.iter().map(|&platform| Choice { platform, files: Vec::new(), keys: Vec::new() }).collect();
         let mut seen: Vec<String> = Vec::new();
         for r in [stable, pre].into_iter().flatten() {
             for a in &r.assets {
@@ -290,9 +300,10 @@ pub fn list_files(bus: &Bus, url: &str) {
                 // The pre-release often has the same files under a newer version.
                 let key = file_key(&r.tag, &a.name);
                 if !seen.contains(&key) {
-                    seen.push(key);
+                    seen.push(key.clone());
                     if let Some(c) = out.iter_mut().find(|c| c.platform == pl) {
                         c.files.push(a.name.clone());
+                        c.keys.push(key.clone());
                     }
                 }
             }
@@ -438,28 +449,109 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn remove_all(bus: &Bus, tag: &str, dir: &Path) {
+fn remove_all(bus: &Bus, tag: &str, dir: &Path) -> bool {
     match std::fs::remove_dir_all(dir) {
-        Ok(()) => bus.log(tag, LogKind::Info, t!("removed {}", "rimossa {}", dir.display())),
-        Err(e) => bus.log(tag, LogKind::Err, t!("cannot remove {}: {e}", "non riesco a rimuovere {}: {e}", dir.display())),
+        Ok(()) => {
+            bus.log(tag, LogKind::Info, t!("removed {}", "rimossa {}", dir.display()));
+            true
+        }
+        Err(e) => {
+            bus.log(tag, LogKind::Err, t!("cannot remove {}: {e}", "non riesco a rimuovere {}: {e}", dir.display()));
+            false
+        }
     }
 }
 
-/// Bring one slot (`latest` or `prerelease`) to the chosen files of `rel`.
-fn sync_slot(bus: &Bus, p: &Project, slot: &Path, rel: &Release) -> Result<(), String> {
-    let tag = p.name.as_str();
-    let wanted: Vec<&Asset> = rel
-        .assets
+/// Inside the releases folder: older stable releases, the pre-release, and
+/// where stable releases were kept before 0.4.
+const OLD: &str = "OLD";
+const PRE: &str = "prerelease";
+const LEGACY: &str = "latest";
+const OWNED_FILE: &str = ".salvage-releases.json";
+
+/// The release folders Salvage made, listed in `.salvage-releases.json` in
+/// the releases folder. In a folder the user picked, only these are ever moved
+/// or deleted: anything else in there is left alone.
+struct Owned {
+    dir: PathBuf,
+    /// `Name-releases` under the backup folder is Salvage's as a whole.
+    all: bool,
+    list: Vec<String>,
+}
+
+impl Owned {
+    fn load(dir: &Path, all: bool) -> Self {
+        let list = std::fs::read_to_string(dir.join(OWNED_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        Self { dir: dir.to_path_buf(), all, list }
+    }
+
+    fn key(&self, path: &Path) -> Option<String> {
+        path.strip_prefix(&self.dir).ok().map(|r| r.to_string_lossy().replace('\\', "/"))
+    }
+
+    fn has(&self, path: &Path) -> bool {
+        let Some(key) = self.key(path) else {
+            return false;
+        };
+        // A side folder for a download in progress is always Salvage's.
+        let incoming = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".incoming-"));
+        self.all || incoming || self.list.contains(&key)
+    }
+
+    fn add(&mut self, path: &Path) {
+        if let Some(key) = self.key(path) {
+            if !self.list.contains(&key) {
+                self.list.push(key);
+            }
+        }
+    }
+
+    fn forget(&mut self, path: &Path) {
+        if let Some(key) = self.key(path) {
+            self.list.retain(|k| *k != key);
+        }
+    }
+
+    fn save(&self) {
+        if !self.dir.is_dir() {
+            return;
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&self.list) {
+            let _ = std::fs::write(self.dir.join(OWNED_FILE), text);
+        }
+    }
+}
+
+/// The files of `rel` for the systems the repo keeps.
+fn wanted<'a>(p: &Project, rel: &'a Release) -> Vec<&'a Asset> {
+    rel.assets
         .iter()
         .filter(|a| platform(&a.name).is_some_and(|pl| p.platforms.iter().any(|k| k == ALL || k == pl.key())))
-        .collect();
+        .collect()
+}
+
+/// Bring `slot/<tag>/` to the chosen files of `rel`. Other releases in the
+/// slot are left alone: the caller decides which of them are outdated.
+/// Returns the release folder, or `None` when `rel` has none of the chosen files.
+fn sync_release(bus: &Bus, p: &Project, slot: &Path, rel: &Release, owned: &mut Owned) -> Result<Option<PathBuf>, String> {
+    let tag = p.name.as_str();
+    let wanted = wanted(p, rel);
     if wanted.is_empty() {
         bus.log(tag, LogKind::Info, t!("{}: none of the chosen files is in this release", "{}: nessuno dei file scelti è in questa release", rel.tag));
-        return Ok(());
+        return Ok(None);
     }
     let current = slot.join(sanitize_name(&rel.tag));
     let mut sums = None;
 
+    if current.is_dir() && !owned.has(&current) {
+        let e = t!(
+            "{} is already there and was not made by Salvage: rename it, or pick another folder",
+            "{} c'è già e non l'ha creata Salvage: rinominala, o scegli un'altra cartella",
+            current.display()
+        );
+        bus.log(tag, LogKind::Err, e.clone());
+        return Err(e);
+    }
     if current.is_dir() {
         // Same release: fetch what is missing, drop what is no longer chosen.
         let mut first_err = None;
@@ -485,8 +577,8 @@ fn sync_slot(bus: &Bus, p: &Project, slot: &Path, rel: &Release) -> Result<(), S
             return Err(e);
         }
     } else {
-        // New release: everything goes into a side folder first. The old
-        // release is deleted only once every new file has passed its check.
+        // New release: everything goes into a side folder first. Old releases
+        // are deleted only once every new file has passed its check.
         bus.log(tag, LogKind::Info, t!("new release {}", "nuova release {}", rel.tag));
         // A folder left by an interrupted sync is reused: its finished files
         // already passed the check, its `.part` files resume.
@@ -498,54 +590,270 @@ fn sync_slot(bus: &Bus, p: &Project, slot: &Path, rel: &Release) -> Result<(), S
                 continue;
             }
             if let Err(e) = download(bus, p, rel, a, &incoming, &mut sums) {
-                bus.log(tag, LogKind::Err, t!("{e}; the old release stays, the next sync picks up from here", "{e}; la release vecchia resta, la prossima sincronizzazione riprende da qui"));
+                bus.log(tag, LogKind::Err, t!("{e}; the old releases stay, the next sync picks up from here", "{e}; le release vecchie restano, la prossima sincronizzazione riprende da qui"));
                 return Err(e);
             }
         }
         std::fs::rename(&incoming, &current).map_err(|e| t!("cannot move {}: {e}", "non riesco a spostare {}: {e}", incoming.display()))?;
     }
-    for old in subdirs(slot).into_iter().filter(|d| *d != current) {
-        remove_all(bus, tag, &old);
-    }
-    Ok(())
+    owned.add(&current);
+    Ok(Some(current))
 }
 
-/// Keep `latest/` and `prerelease/` on the newest releases, with the chosen files.
-pub fn sync(bus: &Bus, p: &Project, root: &Path) -> Result<(), String> {
+/// Delete the release folders in `slot` that are not in `keep`. The `OLD`,
+/// `prerelease` and `latest` folders themselves are not releases.
+fn prune(bus: &Bus, tag: &str, slot: &Path, keep: &[PathBuf], owned: &mut Owned) {
+    for old in subdirs(slot) {
+        let name = old.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if keep.contains(&old) || [OLD, PRE, LEGACY].contains(&name.as_str()) || !owned.has(&old) {
+            continue;
+        }
+        if remove_all(bus, tag, &old) {
+            owned.forget(&old);
+        }
+    }
+}
+
+/// Move release folder `name` into `slot` when an earlier sync left it in
+/// another one (the newest becomes old, or a pre-0.4 `latest/` folder).
+fn place(bus: &Bus, tag: &str, name: &str, slot: &Path, from: &[&Path], owned: &mut Owned) {
+    let target = slot.join(name);
+    if target.exists() {
+        return;
+    }
+    for s in from {
+        let src = s.join(name);
+        if !src.is_dir() || !owned.has(&src) {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(slot);
+        match std::fs::rename(&src, &target) {
+            Ok(()) => {
+                owned.forget(&src);
+                owned.add(&target);
+                bus.log(tag, LogKind::Info, t!("moved {name} to {}", "spostata {name} in {}", slot.display()));
+            }
+            Err(e) => bus.log(tag, LogKind::Err, t!("cannot move {}: {e}", "non riesco a spostare {}: {e}", src.display())),
+        }
+        return;
+    }
+}
+
+/// The newest `n` stable releases that have some of the chosen files, newest first.
+fn stables<'a>(p: &Project, releases: &'a [Release], n: usize) -> Vec<&'a Release> {
+    releases.iter().filter(|r| !r.pre && !wanted(p, r).is_empty()).take(n).collect()
+}
+
+/// Keep the newest stable release in `<dir>/<tag>/`, the older ones the repo
+/// asks for in `<dir>/OLD/<tag>/` and the newest pre-release in
+/// `<dir>/prerelease/<tag>/`, with the chosen files.
+fn archive(bus: &Bus, p: &Project, root: &Path, releases: &[Release]) -> Result<(), String> {
     let tag = p.name.as_str();
-    let releases = fetch(bus, tag, &p.url).inspect_err(|e| bus.log(tag, LogKind::Err, t!("releases: {e}", "release: {e}")))?;
-    let (stable, pre) = pick(&releases);
+    let (stable, pre) = pick(releases);
+    let kept = stables(p, releases, p.keep());
     let dir = p.releases_dir(root);
+    let mut owned = Owned::load(&dir, p.release_dir.is_none());
+    let (old, pre_dir, legacy) = (dir.join(OLD), dir.join(PRE), dir.join(LEGACY));
     let mut first_err = None;
 
-    // No stable release upstream (deleted, or never made): keep what is on disk.
-    if let Some(rel) = stable {
-        if let Err(e) = sync_slot(bus, p, &dir.join("latest"), rel) {
-            first_err.get_or_insert(e);
+    // No stable release upstream with the chosen files (deleted, or never
+    // made): keep what is on disk.
+    if stable.is_some() && kept.is_empty() {
+        bus.log(tag, LogKind::Info, tr("none of the chosen files is in the stable releases", "nessuno dei file scelti è nelle release stabili"));
+    }
+    if !kept.is_empty() {
+        let mut done = Vec::new();
+        for (i, rel) in kept.iter().enumerate() {
+            let slot = if i == 0 { &dir } else { &old };
+            place(bus, tag, &sanitize_name(&rel.tag), slot, &[&dir, &old, &legacy], &mut owned);
+            match sync_release(bus, p, slot, rel, &mut owned) {
+                Ok(Some(folder)) => done.push(folder),
+                Ok(None) => {}
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                    // Without the newest, leave the older ones where they are.
+                    if i == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        // Old releases go only once every kept one is complete, so a failed
+        // download never leaves fewer releases on disk than before.
+        if first_err.is_none() {
+            for slot in [&dir, &old, &legacy] {
+                prune(bus, tag, slot, &done, &mut owned);
+            }
+            // Only when empty: a folder of the user's with that name stays.
+            let _ = std::fs::remove_dir(&old);
+            let _ = std::fs::remove_dir(&legacy);
         }
     }
     match pre {
-        Some(rel) => {
-            if let Err(e) = sync_slot(bus, p, &dir.join("prerelease"), rel) {
+        Some(rel) => match sync_release(bus, p, &pre_dir, rel, &mut owned) {
+            Ok(Some(folder)) => prune(bus, tag, &pre_dir, &[folder], &mut owned),
+            Ok(None) => {}
+            Err(e) => {
                 first_err.get_or_insert(e);
             }
-        }
+        },
         // A stable release came out after the last pre-release: that one is outdated.
         None if stable.is_some() => {
-            for old in subdirs(&dir.join("prerelease")) {
-                remove_all(bus, tag, &old);
-            }
+            prune(bus, tag, &pre_dir, &[], &mut owned);
+            let _ = std::fs::remove_dir(&pre_dir);
         }
         None => {}
     }
+    owned.save();
     match first_err {
         Some(e) => Err(e),
         None => {
-            let names = |r: Option<&Release>| r.map_or("-".to_string(), |r| r.tag.clone());
-            bus.log(tag, LogKind::Good, t!("releases: latest {}, pre-release {}", "release: latest {}, pre-release {}", names(stable), names(pre)));
+            let latest = if kept.is_empty() { "-".to_string() } else { kept.iter().map(|r| r.tag.as_str()).collect::<Vec<_>>().join(", ") };
+            let pre = pre.map_or("-".to_string(), |r| r.tag.clone());
+            bus.log(tag, LogKind::Good, t!("releases: kept {latest}, pre-release {pre}", "release: tenute {latest}, pre-release {pre}"));
             Ok(())
         }
     }
+}
+
+/// In the folder the auto-updater keeps: its download and unpacked files
+/// while it works, and what it last installed.
+const UPDATE_WORK: &str = ".salvage-update";
+const UPDATE_STATE: &str = ".salvage-update.json";
+
+#[derive(Serialize, Deserialize, Default)]
+struct Installed {
+    tag: String,
+    file: String,
+    /// A file copied as it is (not an archive): replaced by the next one.
+    #[serde(default)]
+    lone: bool,
+}
+
+/// The words of a file name that stay the same from one build to the next:
+/// version numbers, `rc2`, commit hashes and the like are left out.
+fn shape(name: &str) -> Vec<String> {
+    let changing = |w: &str| {
+        let digits = w.chars().any(|c| c.is_ascii_digit());
+        let tail = |pre: &str| w.strip_prefix(pre).is_some_and(|t| t.chars().all(|c| c.is_ascii_digit()));
+        w.chars().all(|c| c.is_ascii_digit())
+            || ["v", "rc", "beta", "alpha", "b", "pre", "dev", "build", "r"].iter().any(|p| tail(p))
+            || (digits && w.len() >= 7 && w.chars().all(|c| c.is_ascii_hexdigit()))
+    };
+    name.to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty() && !changing(w))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The file of `rel` the updater follows: the same name with the version
+/// swapped, or else the one file whose name has the same shape.
+fn update_asset<'a>(rel: &'a Release, u: &Update) -> Option<&'a Asset> {
+    if let Some(a) = rel.assets.iter().find(|a| file_key(&rel.tag, &a.name) == u.file) {
+        return Some(a);
+    }
+    let want = shape(&u.name);
+    let mut same = rel.assets.iter().filter(|a| shape(&a.name) == want);
+    match (same.next(), same.next()) {
+        (Some(a), None) => Some(a),
+        _ => None,
+    }
+}
+
+/// Unpack the newest build of the chosen file over the update folder.
+/// Files only in the folder (saves, settings) stay.
+fn update(bus: &Bus, p: &Project, u: &Update, releases: &[Release]) -> Result<(), String> {
+    let tag = p.name.as_str();
+    let Some(rel) = releases.iter().find(|r| u.pre || !r.pre) else {
+        bus.log(tag, LogKind::Info, tr("auto-update: no release yet", "aggiornamento automatico: ancora nessuna release"));
+        return Ok(());
+    };
+    let Some(a) = update_asset(rel, u) else {
+        bus.log(
+            tag,
+            LogKind::Info,
+            t!("auto-update: {} has no file like {}, nothing to do", "aggiornamento automatico: {} non ha un file come {}, niente da fare", rel.tag, u.name),
+        );
+        return Ok(());
+    };
+    let dir = &u.dir;
+    let state_path = dir.join(UPDATE_STATE);
+    let state: Installed = std::fs::read_to_string(&state_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if state.tag == rel.tag && state.file == a.name {
+        bus.log(tag, LogKind::Info, t!("auto-update: {} already on {}", "aggiornamento automatico: {} già su {}", dir.display(), rel.tag));
+        return Ok(());
+    }
+
+    let work = dir.join(UPDATE_WORK);
+    std::fs::create_dir_all(&work).map_err(|e| t!("cannot create {}: {e}", "non riesco a creare {}: {e}", work.display()))?;
+    let name = sanitize_name(&a.name);
+    // Leftovers of an earlier try: anything but this file and its `.part`.
+    for f in std::fs::read_dir(&work).into_iter().flatten().flatten() {
+        let n = f.file_name().to_string_lossy().to_string();
+        if f.path().is_dir() {
+            let _ = std::fs::remove_dir_all(f.path());
+        } else if n != name && n != format!("{name}.part") {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
+    let file = work.join(&name);
+    let len = std::fs::metadata(&file).ok().map(|m| m.len());
+    if !(len.is_some() && (a.size.is_none() || len == a.size)) {
+        download(bus, p, rel, a, &work, &mut None)?;
+    }
+
+    let stage = work.join("unpacked");
+    let lone = extract::kind(&a.name).is_none();
+    let n = if lone {
+        let _ = std::fs::create_dir_all(&stage);
+        std::fs::copy(&file, stage.join(&name)).map_err(|e| format!("{name}: {e}"))?;
+        extract::install(&stage, dir)?
+    } else {
+        extract::unpack(&file, &stage)?;
+        extract::install(&extract::content_root(&stage), dir)?
+    };
+    if lone {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir.join(&name), std::fs::Permissions::from_mode(0o755));
+        }
+        // The previous build of a lone file has another name: it goes.
+        if state.lone && !state.file.is_empty() && sanitize_name(&state.file) != name {
+            let _ = std::fs::remove_file(dir.join(sanitize_name(&state.file)));
+        }
+    }
+    let now = Installed { tag: rel.tag.clone(), file: a.name.clone(), lone };
+    if let Ok(text) = serde_json::to_string_pretty(&now) {
+        let _ = std::fs::write(&state_path, text);
+    }
+    let _ = std::fs::remove_dir_all(&work);
+    bus.log(
+        tag,
+        LogKind::Good,
+        t!("auto-update: {} now on {} ({n} files)", "aggiornamento automatico: {} ora su {} ({n} file)", dir.display(), rel.tag),
+    );
+    Ok(())
+}
+
+/// Release files and auto-update of one repo, from one read of its releases.
+pub fn sync(bus: &Bus, p: &Project, root: &Path) -> Result<(), String> {
+    let tag = p.name.as_str();
+    let releases = fetch(bus, tag, &p.url).inspect_err(|e| bus.log(tag, LogKind::Err, t!("releases: {e}", "release: {e}")))?;
+    let mut first_err = None;
+    if p.releases {
+        if let Err(e) = archive(bus, p, root, &releases) {
+            first_err.get_or_insert(e);
+        }
+    }
+    if let Some(u) = &p.update {
+        if let Err(e) = update(bus, p, u, &releases) {
+            bus.log(tag, LogKind::Err, t!("auto-update: {e}", "aggiornamento automatico: {e}"));
+            first_err.get_or_insert(e);
+        }
+    }
+    first_err.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -620,6 +928,49 @@ mod tests {
         assert_eq!((s.map(|r| r.tag.as_str()), p.map(|r| r.tag.as_str())), (Some("v2"), Some("v3-rc")));
         let list = [r("v2", false), r("v2-rc", true)];
         assert!(pick(&list).1.is_none());
+    }
+
+    #[test]
+    fn follows_the_same_file() {
+        let asset = |name: &str| Asset { name: name.into(), url: String::new(), size: None, sha256: None };
+        let rel = Release {
+            tag: "v0.0.4-rc1".into(),
+            pre: true,
+            date: String::new(),
+            assets: ["Eden-Windows-v0.0.4-rc1-amd64-msvc.zip", "Eden-Windows-v0.0.4-rc1-arm64-msvc.zip", "Eden-Linux-v0.0.4-rc1-amd64.AppImage"].map(asset).into(),
+        };
+        let u = |name: &str| Update { dir: PathBuf::new(), file: file_key("v0.0.3", name), name: name.into(), pre: true };
+        let found = |name: &str| update_asset(&rel, &u(name)).map(|a| a.name.clone());
+        assert_eq!(found("Eden-Windows-v0.0.3-amd64-msvc.zip").as_deref(), Some("Eden-Windows-v0.0.4-rc1-amd64-msvc.zip"));
+        assert_eq!(found("Eden-Windows-v0.0.3-arm64-msvc.zip").as_deref(), Some("Eden-Windows-v0.0.4-rc1-arm64-msvc.zip"));
+        // A commit hash in the name instead of the tag.
+        assert_eq!(found("Eden-Linux-a1b2c3d-amd64.AppImage").as_deref(), Some("Eden-Linux-v0.0.4-rc1-amd64.AppImage"));
+        assert_eq!(found("Eden-Android.apk"), None);
+    }
+
+    #[test]
+    fn keeps_newest_stables() {
+        let asset = |name: &str| Asset { name: name.into(), url: String::new(), size: None, sha256: None };
+        let r = |tag: &str, pre: bool, files: &[&str]| Release { tag: tag.into(), pre, date: String::new(), assets: files.iter().map(|f| asset(f)).collect() };
+        let list = [
+            r("v5-rc", true, &["App-win.zip"]),
+            r("v4", false, &["App-linux.tar.gz"]),
+            r("v3", false, &["App-win.zip"]),
+            r("v2", false, &["App-win.zip"]),
+            r("v1", false, &["App-win.zip"]),
+        ];
+        let mut p = crate::model::Config::fresh(PathBuf::new());
+        p.add("a".into(), String::new(), false, false);
+        let mut p = p.projects.remove(0);
+        p.platforms = vec![Platform::Windows.key().to_string()];
+        let tags = |n| stables(&p, &list, n).iter().map(|r| r.tag.clone()).collect::<Vec<_>>();
+        assert_eq!(tags(1), ["v3"]);
+        assert_eq!(tags(2), ["v3", "v2"]);
+        assert_eq!(tags(10), ["v3", "v2", "v1"]);
+        p.keep = 0;
+        assert_eq!(p.keep(), 1);
+        p.keep = 200;
+        assert_eq!(p.keep(), 10);
     }
 
     #[test]

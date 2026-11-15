@@ -572,7 +572,7 @@ pub fn sync(bus: &Bus, p: &Project, root: &Path, fresh_work: bool) -> Result<(),
         }
     }
 
-    if p.releases {
+    if p.releases || p.update.is_some() {
         crate::releases::sync(bus, p, root)?;
     }
 
