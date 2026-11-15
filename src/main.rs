@@ -6,6 +6,7 @@ mod lang;
 mod app;
 mod extract;
 mod git;
+mod gitsetup;
 mod headless;
 mod icon;
 mod model;

@@ -13,6 +13,7 @@ use eframe::egui::{
 };
 
 use crate::git::{self, Bus, Check, Event, LogKind};
+use crate::gitsetup;
 use crate::headless;
 use crate::lang::{branches, repos, tr};
 use crate::model::{self, ago, hours_label, name_from_url, now_ts, sanitize_name, short_url, Config, Project};
@@ -213,6 +214,23 @@ enum Folder {
     Update,
 }
 
+/// The "Git is not installed" popup.
+enum GitAsk {
+    Hidden,
+    Ask,
+    /// An install is running; what is being installed.
+    Working(&'static str),
+    /// The last install failed: why. The choices are offered again.
+    Failed(String),
+}
+
+#[derive(Clone, Copy)]
+enum GitPick {
+    System,
+    MinGit,
+    Cancel,
+}
+
 struct Shot {
     path: PathBuf,
     /// Seconds after launch at which to save a frame; the app quits after the last.
@@ -235,6 +253,9 @@ pub struct App {
     term_x: f32,
     term_full: bool,
     dialog: Option<Dialog>,
+    git_ask: GitAsk,
+    /// "cancel" was picked: no popup again until the next start.
+    git_dismissed: bool,
     now: f64,
     shot: Option<Shot>,
     /// Tells a scheduled `--sync` that the window is open and in charge.
@@ -330,6 +351,8 @@ impl App {
             term_x: 20.0,
             term_full: false,
             dialog: None,
+            git_ask: GitAsk::Hidden,
+            git_dismissed: false,
             now: 0.0,
             shot,
             _lock: model::lock(),
@@ -342,6 +365,7 @@ impl App {
             app.save();
             app.import();
         }
+        app.want_git();
         if app.cfg.check_on_start {
             app.check_all();
         }
@@ -355,6 +379,7 @@ impl App {
             Ok("settings") => app.open_settings(),
             Ok("term") => app.term_full = true,
             Ok("sync") => app.sync_all(),
+            Ok("git") => app.git_ask = GitAsk::Ask,
             _ => {}
         }
         app
@@ -362,6 +387,15 @@ impl App {
 
     fn save(&self) {
         self.cfg.save(&self.cfg_path);
+    }
+
+    /// Offer to install Git when a repo needs it and this PC has none.
+    /// Only Windows: elsewhere Git comes from the package manager.
+    fn want_git(&mut self) {
+        let needed = self.cfg.projects.iter().any(|p| p.mirror || p.work);
+        if cfg!(windows) && needed && !self.git_dismissed && matches!(self.git_ask, GitAsk::Hidden) && gitsetup::git().is_none() {
+            self.git_ask = GitAsk::Ask;
+        }
     }
 
     fn say(&mut self, kind: LogKind, text: impl Into<String>) {
@@ -498,7 +532,11 @@ impl App {
                 if rt.busy == Busy::Checking {
                     rt.busy = Busy::Idle;
                 }
+                let no_git = check.error.as_deref() == Some(git::missing_msg("git").as_str());
                 rt.check = Some(check);
+                if no_git {
+                    self.want_git();
+                }
             }
             Event::Synced { id, error } => {
                 self.running = self.running.saturating_sub(1);
@@ -518,6 +556,9 @@ impl App {
                     }
                 }
                 self.save();
+                if error.as_deref() == Some(git::missing_msg("git").as_str()) {
+                    self.want_git();
+                }
                 if !stopped {
                     self.start_check(id);
                 }
@@ -539,6 +580,21 @@ impl App {
                     }
                 }
             }
+            Event::GitSetup(result) => match result {
+                Ok(()) => {
+                    self.git_ask = GitAsk::Hidden;
+                    // Sync again what failed for lack of Git.
+                    let missing = git::missing_msg("git");
+                    let ids: Vec<u64> = self.cfg.projects.iter().filter(|p| p.last_error.as_deref() == Some(missing.as_str())).map(|p| p.id).collect();
+                    for id in ids {
+                        self.queue_sync(id, false);
+                    }
+                }
+                Err(e) => {
+                    self.say(LogKind::Err, e.clone());
+                    self.git_ask = GitAsk::Failed(e);
+                }
+            },
             Event::Imported(found) => {
                 let mut added = Vec::new();
                 for f in found {
@@ -1035,6 +1091,111 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The popup offering to install Git: for the whole PC, or portable MinGit.
+    fn git_ui(&mut self, ctx: &egui::Context) {
+        if matches!(self.git_ask, GitAsk::Hidden) || self.dialog.is_some() {
+            return;
+        }
+        let working = matches!(self.git_ask, GitAsk::Working(_));
+        let portable = model::portable_dir().is_some();
+        let mut pick = None;
+        let screen = ctx.screen_rect();
+        let body = Rect::from_min_max(pos2(screen.left(), screen.top() + TITLE_H + 1.0), screen.max);
+        egui::Area::new(Id::new("git_ask"))
+            .order(Order::Foreground)
+            .fixed_pos(body.min)
+            .show(ctx, |ui| {
+                ui.allocate_rect(body, Sense::click());
+                let p = ui.painter().with_clip_rect(body);
+                p.rect_filled(body, 0, alpha(ABYSS(), 0.72));
+                let rect = Rect::from_center_size(body.center(), vec2(600.0, 300.0f32.min(body.height() - 24.0)));
+                paint::solid(&p, rect);
+                let inner = rect.shrink2(vec2(30.0, 26.0));
+                let mut ui = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
+                ui.set_clip_rect(rect);
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                let note = |ui: &mut Ui, text: &str, col: Color32| {
+                    ui.label(egui::RichText::new(text).font(mono(11.5)).color(col));
+                };
+                ui.label(egui::RichText::new(tr("Git is not installed", "Git non è installato")).font(mono(16.0)).color(FOAM()));
+                note(
+                    &mut ui,
+                    tr(
+                        "Repos with a mirror or a working copy need Git. Repos kept only for their release files work without it.",
+                        "I repo con mirror o copia di lavoro hanno bisogno di Git. Quelli con solo le release funzionano anche senza.",
+                    ),
+                    KELP(),
+                );
+                ui.add_space(4.0);
+                note(
+                    &mut ui,
+                    tr(
+                        "For the PC: Git for Windows through winget, added to the system PATH. Windows asks for admin rights.",
+                        "Per il PC: Git for Windows con winget, aggiunto al PATH di sistema. Windows chiede i permessi di amministratore.",
+                    ),
+                    FOAM(),
+                );
+                note(
+                    &mut ui,
+                    &t!(
+                        "MinGit portable: the official minimal Git, unpacked in {}. No admin, nothing installed.",
+                        "MinGit portatile: il Git minimo ufficiale, estratto in {}. Niente admin, niente installazione.",
+                        gitsetup::mingit_dir().display()
+                    ),
+                    FOAM(),
+                );
+                match &self.git_ask {
+                    GitAsk::Working(what) => note(&mut ui, &t!("Installing {what}: follow it in the terminal.", "Installo {what}: segui nel terminale."), FLARE()),
+                    GitAsk::Failed(e) => note(&mut ui, e, WRECK()),
+                    _ => {}
+                }
+
+                let bar = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 30.0), inner.max);
+                ui.allocate_new_ui(UiBuilder::new().max_rect(bar).layout(Layout::right_to_left(Align::Center)), |ui| {
+                    if working {
+                        return;
+                    }
+                    // In portable mode the portable Git is the natural pick.
+                    let (system, mingit) = if portable { (Tone::Quiet, Tone::Primary) } else { (Tone::Primary, Tone::Quiet) };
+                    if button(ui, None, tr("MinGit portable", "MinGit portatile"), mingit).clicked() {
+                        pick = Some(GitPick::MinGit);
+                    }
+                    if button(ui, None, tr("install for the PC (admin)", "installa per il PC (admin)"), system).clicked() {
+                        pick = Some(GitPick::System);
+                    }
+                    if button(ui, None, tr("cancel", "annulla"), Tone::Quiet).clicked() {
+                        pick = Some(GitPick::Cancel);
+                    }
+                });
+            });
+        if !working && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            pick = Some(GitPick::Cancel);
+        }
+        let Some(pick) = pick else {
+            return;
+        };
+        let bus = self.bus.clone();
+        let install: fn(&Bus) -> Result<(), String> = match pick {
+            GitPick::Cancel => {
+                self.git_ask = GitAsk::Hidden;
+                self.git_dismissed = true;
+                return;
+            }
+            GitPick::System => {
+                self.git_ask = GitAsk::Working("Git for Windows");
+                gitsetup::install_system
+            }
+            GitPick::MinGit => {
+                self.git_ask = GitAsk::Working("MinGit");
+                gitsetup::install_mingit
+            }
+        };
+        std::thread::spawn(move || {
+            let r = install(&bus);
+            bus.send(Event::GitSetup(r));
+        });
     }
 
     // ---- main surface ----------------------------------------------------
@@ -1574,7 +1735,7 @@ impl eframe::App for App {
             .show(ctx, |ui| self.body(ui, &mut acts))
             .inner;
 
-        let modal = self.dialog.is_some();
+        let modal = self.dialog.is_some() || !matches!(self.git_ask, GitAsk::Hidden);
         if over_term && !modal {
             let dy = ctx.input(|i| i.smooth_scroll_delta.y);
             if dy != 0.0 {
@@ -1586,6 +1747,7 @@ impl eframe::App for App {
         }
 
         self.dialog_ui(ctx);
+        self.git_ui(ctx);
         for act in acts {
             self.apply(ctx, act);
         }

@@ -93,6 +93,8 @@ pub enum Event {
         url: String,
         result: Result<Vec<crate::releases::Choice>, String>,
     },
+    /// An install of Git ended (see [`crate::gitsetup`]).
+    GitSetup(Result<(), String>),
 }
 
 #[derive(Clone)]
@@ -122,7 +124,10 @@ impl Bus {
 /// `git`, or `curl` for release files. curl ships with Windows 10 and 11;
 /// Git does not, so it may be missing (see [`has_git`]).
 fn tool(program: &str, dir: Option<&Path>) -> Command {
-    let mut c = Command::new(program);
+    let mut c = match crate::gitsetup::git().filter(|_| program == "git") {
+        Some(exe) => Command::new(exe),
+        None => Command::new(program),
+    };
     if let Some(d) = dir {
         c.current_dir(d);
     }
@@ -144,12 +149,19 @@ fn tool(program: &str, dir: Option<&Path>) -> Command {
 
 /// Why `program` did not start, worded for a person.
 fn spawn_error(program: &str, e: &std::io::Error) -> String {
-    if e.kind() != std::io::ErrorKind::NotFound {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        missing_msg(program)
+    } else {
         t!("could not start {program}: {e}", "{program} non parte: {e}")
-    } else if program == "git" {
+    }
+}
+
+/// What a run of `program` reports when the PC does not have it.
+pub(crate) fn missing_msg(program: &str) -> String {
+    if program == "git" {
         tr(
-            "Git is not installed: get it from git-scm.com, then restart Salvage",
-            "Git non è installato: scaricalo da git-scm.com, poi riavvia Salvage",
+            "Git is not installed: get it from git-scm.com, or let Salvage install it",
+            "Git non è installato: scaricalo da git-scm.com, o lascia che Salvage lo installi",
         )
         .into()
     } else {
@@ -157,11 +169,9 @@ fn spawn_error(program: &str, e: &std::io::Error) -> String {
     }
 }
 
-/// Git is on the PATH. Found once per run: an install made while Salvage
-/// runs only shows up in a new process anyway.
+/// Git is on this PC (see [`crate::gitsetup::git`]).
 fn has_git() -> bool {
-    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FOUND.get_or_init(|| tool("git", None).arg("--version").output().is_ok_and(|o| o.status.success()))
+    crate::gitsetup::git().is_some()
 }
 
 /// What `git ls-remote` prints: one `hash<TAB>ref` per line. Without Git, an
@@ -338,6 +348,11 @@ fn run(
     echo_stdout: bool,
 ) -> Done {
     run_tool(bus, tag, id, "git", dir, args, timeout, echo_stdout, None)
+}
+
+/// Run any other program the same way (winget, for installing Git).
+pub(crate) fn program(bus: &Bus, tag: &str, program: &str, args: &[&str], timeout: Option<Duration>) -> Done {
+    run_tool(bus, tag, None, program, None, args, timeout, true, None)
 }
 
 /// Run one `curl` command the same way; used for release files.

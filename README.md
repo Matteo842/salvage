@@ -65,7 +65,12 @@ Repos already in that folder are found and added on first run.
 
 - Windows 10 or 11, or Linux x86_64 (glibc 2.31 or newer: Ubuntu 20.04,
   Debian 11, Fedora, Arch and the like), on X11 or Wayland
-- [`git`](https://git-scm.com/downloads) in your `PATH`
+- [`git`](https://git-scm.com/downloads), for repos with a mirror or a working
+  copy. Repos kept only for their release files work without it. On Windows,
+  if Git is missing, Salvage offers to install it: for the whole PC through
+  `winget` (asks for admin rights), or as portable MinGit in Salvage's own
+  `git` folder (next to the exe in portable mode). Git in `Program Files` is
+  found even when it is not on the `PATH`.
 - `curl` for release files (it comes with Windows 10 and 11, and with nearly
   every Linux distro)
 
