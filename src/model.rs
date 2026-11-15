@@ -105,6 +105,10 @@ pub struct Config {
     /// Pure black and white look instead of the deep-water palette.
     #[serde(default)]
     pub oled: bool,
+    /// GitHub token for reading releases (empty: none). See
+    /// [`crate::releases::set_github_token`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub github_token: String,
     pub next_id: u64,
     pub projects: Vec<Project>,
 }
@@ -119,6 +123,7 @@ impl Config {
             last_sync_all: Some(now_ts()),
             scheduled_task: false,
             oled: false,
+            github_token: String::new(),
             next_id: 1,
             projects: Vec::new(),
         }

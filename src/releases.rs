@@ -16,19 +16,34 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::git::{curl, stopped_msg, Bus, Event, LogKind};
+use crate::git::{curl, curl_with_input, stopped_msg, Bus, Event, LogKind};
 use crate::lang::tr;
 use crate::extract;
 use crate::model::{sanitize_name, Project, Update};
 
 /// Saved in a project's platforms: every file, whatever system it is for.
 pub const ALL: &str = "all";
+
+/// Token from the settings for GitHub's API (empty: none). Without one GitHub
+/// answers 60 requests per hour per address; with one, 5000.
+static GITHUB_TOKEN: Mutex<String> = Mutex::new(String::new());
+
+pub fn set_github_token(token: &str) {
+    if let Ok(mut t) = GITHUB_TOKEN.lock() {
+        *t = token.trim().to_string();
+    }
+}
+
+fn github_token() -> String {
+    GITHUB_TOKEN.lock().map(|t| t.clone()).unwrap_or_default()
+}
 
 /// Tries per file before giving up until the next sync.
 const DOWNLOAD_TRIES: u32 = 5;
@@ -234,10 +249,20 @@ fn parse(api: Api, r: &Value) -> Option<Release> {
 /// Turn curl's wording into something a person can act on.
 fn humanize(err: &str) -> String {
     let e = err.trim().trim_start_matches("curl:").trim();
-    if e.contains("error: 404") {
+    if e.contains("error: 401") {
+        tr("GitHub refused the token in the settings (wrong, expired or revoked)", "GitHub rifiuta il token nelle impostazioni (sbagliato, scaduto o revocato)").into()
+    } else if e.contains("error: 404") {
         tr("releases not found (repo removed, made private, or the host has no releases)", "release non trovate (repo rimosso, reso privato, o l'host non ha release)").into()
     } else if e.contains("error: 403") || e.contains("error: 429") {
-        tr("the host refused: too many requests, try again in an hour", "l'host rifiuta: troppe richieste, riprova tra un'ora").into()
+        if github_token().is_empty() {
+            tr(
+                "the host refused: too many requests, try again in an hour (for GitHub: add a token in the settings)",
+                "l'host rifiuta: troppe richieste, riprova tra un'ora (per GitHub: aggiungi un token nelle impostazioni)",
+            )
+            .into()
+        } else {
+            tr("the host refused: too many requests, try again in an hour", "l'host rifiuta: troppe richieste, riprova tra un'ora").into()
+        }
     } else if e.contains("Could not resolve host") {
         tr("host unreachable (domain gone or no network)", "host non raggiungibile (dominio sparito o niente rete)").into()
     } else if e.is_empty() {
@@ -262,7 +287,18 @@ fn fetch(bus: &Bus, tag: &str, url: &str) -> Result<Vec<Release>, String> {
     };
     let mut last_err = String::new();
     for &api in apis {
-        let done = curl(bus, tag, None, &["-fsSL", "-H", "Accept: application/json", "-A", "Salvage", &api_url(api, &base, &path)], Some(Duration::from_secs(40)));
+        let api_link = api_url(api, &base, &path);
+        let mut args = vec!["-fsSL", "-H", "Accept: application/json", "-A", "Salvage"];
+        let token = if matches!(api, Api::GitHub) { github_token() } else { String::new() };
+        // The token only ever goes to api.github.com, through stdin.
+        let done = if token.is_empty() {
+            args.push(&api_link);
+            curl(bus, tag, None, &args, Some(Duration::from_secs(40)))
+        } else {
+            args.extend(["-H", "@-", api_link.as_str()]);
+            curl_with_input(bus, tag, &args, Some(Duration::from_secs(40)), &format!("Authorization: Bearer {token}
+"))
+        };
         if !done.ok {
             last_err = humanize(&done.err);
             continue;

@@ -2,7 +2,7 @@
 //! through [`Bus`]; nothing here touches the UI state directly.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -223,12 +223,18 @@ fn run(
     timeout: Option<Duration>,
     echo_stdout: bool,
 ) -> Done {
-    run_tool(bus, tag, id, "git", dir, args, timeout, echo_stdout)
+    run_tool(bus, tag, id, "git", dir, args, timeout, echo_stdout, None)
 }
 
 /// Run one `curl` command the same way; used for release files.
 pub(crate) fn curl(bus: &Bus, tag: &str, id: Option<u64>, args: &[&str], timeout: Option<Duration>) -> Done {
-    run_tool(bus, tag, id, "curl", None, args, timeout, false)
+    run_tool(bus, tag, id, "curl", None, args, timeout, false, None)
+}
+
+/// `curl` that also gets `input` on stdin: for secrets (`-H @-`), which must
+/// not show up in the log nor in the process list.
+pub(crate) fn curl_with_input(bus: &Bus, tag: &str, args: &[&str], timeout: Option<Duration>, input: &str) -> Done {
+    run_tool(bus, tag, None, "curl", None, args, timeout, false, Some(input))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,9 +247,14 @@ fn run_tool(
     args: &[&str],
     timeout: Option<Duration>,
     echo_stdout: bool,
+    input: Option<&str>,
 ) -> Done {
     bus.log(tag, LogKind::Cmd, format!("{program} {}", args.join(" ")));
-    let mut child = match tool(program, dir).args(args).spawn() {
+    let mut cmd = tool(program, dir);
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = match cmd.args(args).spawn() {
         Ok(c) => c,
         Err(e) => {
             let msg = t!("could not start {program}: {e}", "{program} non parte: {e}");
@@ -255,6 +266,10 @@ fn run_tool(
             };
         }
     };
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        // Small enough for the pipe buffer; dropping `stdin` closes it.
+        let _ = stdin.write_all(text.as_bytes());
+    }
     let out = child.stdout.take().expect("piped stdout");
     let err = child.stderr.take().expect("piped stderr");
 

@@ -18,6 +18,7 @@ pub fn run() {
     let Some(cfg) = Config::load(&path) else {
         return;
     };
+    crate::releases::set_github_token(&cfg.github_token);
     // The window holds this lock while open and syncs on its own schedule.
     let Some(_lock) = model::lock() else {
         return;

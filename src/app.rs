@@ -127,6 +127,7 @@ struct Dialog {
     task: bool,
     check_start: bool,
     oled: bool,
+    token: String,
     focus: bool,
 }
 
@@ -188,6 +189,7 @@ impl Dialog {
             task: false,
             check_start: true,
             oled: false,
+            token: String::new(),
             focus: true,
         }
     }
@@ -292,6 +294,7 @@ impl App {
         }
 
         theme::set_oled(cfg.oled);
+        releases::set_github_token(&cfg.github_token);
         apply(&cc.egui_ctx);
 
         if cfg.auto_sync && cfg.last_sync_all.is_none() {
@@ -644,6 +647,7 @@ impl App {
         d.task = self.cfg.scheduled_task;
         d.check_start = self.cfg.check_on_start;
         d.oled = self.cfg.oled;
+        d.token = self.cfg.github_token.clone();
         d.focus = false;
         self.dialog = Some(d);
     }
@@ -739,6 +743,8 @@ impl App {
                 self.cfg.auto_sync = d.auto;
                 self.cfg.check_on_start = d.check_start;
                 self.cfg.oled = d.oled;
+                self.cfg.github_token = d.token.trim().to_string();
+                releases::set_github_token(&self.cfg.github_token);
                 self.save();
                 if moved {
                     for rt in self.rt.values_mut() {
@@ -771,7 +777,7 @@ impl App {
         let height = match d.kind {
             Kind::Add => 336.0 + releases_h(&d) + update_h(&d),
             Kind::Edit(_) => 384.0 + releases_h(&d) + update_h(&d) + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
-            Kind::Settings => 434.0,
+            Kind::Settings => 556.0,
         };
         let height = height.min(body.height() - 24.0);
 
@@ -883,6 +889,20 @@ impl App {
                                 theme::set_oled(d.oled);
                                 apply(ctx);
                             }
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
+                                ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, tr("GitHub token", "token GitHub"), mono(12.5), FOAM());
+                                widgets::secret_field(ui, Id::new("dlg_token"), &mut d.token, tr("optional", "facoltativo"), w - 158.0);
+                            });
+                            note(
+                                ui,
+                                tr(
+                                    "Removes GitHub's limit of 60 requests per hour, which many repos with releases can hit. A token with no permissions is enough (github.com/settings/tokens). Used only to read releases from api.github.com.",
+                                    "Toglie il limite di GitHub di 60 richieste l'ora, che con tanti repo con release si raggiunge. Basta un token senza permessi (github.com/settings/tokens). Usato solo per leggere le release da api.github.com.",
+                                ),
+                                DEEP(),
+                            );
                         }
                     }
                 });
