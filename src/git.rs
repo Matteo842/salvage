@@ -370,6 +370,8 @@ fn humanize(err: &str) -> String {
         tr("server asks for a login (removed or made private)", "il server chiede un login (rimosso o reso privato)").into()
     } else if low.contains("failed to connect") || low.contains("connection timed out") || low.contains("connection refused") {
         tr("server does not answer", "il server non risponde").into()
+    } else if is_transient(e) {
+        t!("the connection broke {NET_TRIES} times in a row, the next sync tries again", "la connessione si è interrotta {NET_TRIES} volte di fila, la prossima sincronizzazione riprova")
     } else if low.contains("fast-forward") || low.contains("unrelated histories") || low.contains("divergent") {
         tr("working copy no longer follows the remote: open edit and re-clone it", "la copia di lavoro non segue più il remoto: apri modifica e riparti da zero").into()
     } else if e.is_empty() {
@@ -481,6 +483,48 @@ fn align_remote(bus: &Bus, tag: &str, dir: &Path, url: &str) -> bool {
     moved
 }
 
+/// Tries for a git command that talks to the remote before giving up.
+const NET_TRIES: u32 = 3;
+
+/// The connection broke, as opposed to the remote saying no: worth another try.
+/// `error processing acks: 4` is the server ending its answer halfway through.
+fn is_transient(err: &str) -> bool {
+    let e = err.to_lowercase();
+    [
+        "error processing acks",
+        "rpc failed",
+        "early eof",
+        "unexpected disconnect",
+        "the remote end hung up",
+        "connection was reset",
+        "connection reset",
+        "recv failure",
+        "send failure",
+        "timed out",
+        "http/2 stream",
+        "returned error: 50",
+        "invalid index-pack output",
+        "ssl",
+        "schannel",
+    ]
+    .iter()
+    .any(|s| e.contains(s))
+}
+
+/// Run a git command that talks to the remote, again if the connection breaks.
+fn run_net(bus: &Bus, tag: &str, id: Option<u64>, dir: Option<&Path>, args: &[&str]) -> Done {
+    let mut attempt = 1;
+    loop {
+        let done = run(bus, tag, id, dir, args, None, true);
+        if done.ok || attempt >= NET_TRIES || !is_transient(&done.err) || bus.cancel.load(Ordering::Relaxed) {
+            return done;
+        }
+        attempt += 1;
+        bus.log(tag, LogKind::Info, t!("the connection broke, trying again ({attempt}/{NET_TRIES})", "la connessione si è interrotta, riprovo ({attempt}/{NET_TRIES})"));
+        std::thread::sleep(Duration::from_secs(3));
+    }
+}
+
 fn step(done: Done) -> Result<(), String> {
     if done.ok {
         Ok(())
@@ -500,10 +544,10 @@ pub fn sync(bus: &Bus, p: &Project, root: &Path, fresh_work: bool) -> Result<(),
         let dir = p.mirror_dir(root);
         if is_repo(&dir) {
             align_remote(bus, tag, &dir, &p.url);
-            step(run(bus, tag, id, Some(&dir), &["fetch", "--progress", "origin"], None, true))?;
+            step(run_net(bus, tag, id, Some(&dir), &["fetch", "--progress", "origin"]))?;
         } else {
             let target = dir.to_string_lossy().to_string();
-            step(run(bus, tag, id, Some(root), &["clone", "--mirror", "--progress", &p.url, &target], None, true))?;
+            step(run_net(bus, tag, id, Some(root), &["clone", "--mirror", "--progress", &p.url, &target]))?;
         }
     }
 
@@ -517,14 +561,14 @@ pub fn sync(bus: &Bus, p: &Project, root: &Path, fresh_work: bool) -> Result<(),
         }
         if is_repo(&dir) {
             let moved = align_remote(bus, tag, &dir, &p.url);
-            step(run(bus, tag, id, Some(&dir), &["pull", "--ff-only", "--progress"], None, true))?;
+            step(run_net(bus, tag, id, Some(&dir), &["pull", "--ff-only", "--progress"]))?;
             if moved {
                 run(bus, tag, id, Some(&dir), &["submodule", "sync", "--recursive"], None, true);
             }
-            step(run(bus, tag, id, Some(&dir), &["submodule", "update", "--init", "--recursive", "--progress"], None, true))?;
+            step(run_net(bus, tag, id, Some(&dir), &["submodule", "update", "--init", "--recursive", "--progress"]))?;
         } else {
             let target = dir.to_string_lossy().to_string();
-            step(run(bus, tag, id, Some(root), &["clone", "--recursive", "--progress", &p.url, &target], None, true))?;
+            step(run_net(bus, tag, id, Some(root), &["clone", "--recursive", "--progress", &p.url, &target]))?;
         }
     }
 
@@ -594,4 +638,19 @@ pub fn scan(root: &Path) -> Vec<Found> {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_transient;
+
+    #[test]
+    fn transient() {
+        assert!(is_transient("fatal: error processing acks: 4"));
+        assert!(is_transient("error: RPC failed; curl 56 Recv failure: Connection was reset"));
+        assert!(is_transient("fatal: early EOF"));
+        assert!(!is_transient("remote: Repository not found."));
+        assert!(!is_transient("fatal: Not possible to fast-forward, aborting."));
+        assert!(!is_transient("fatal: could not read Username for 'https://github.com': terminal prompts disabled"));
+    }
 }
