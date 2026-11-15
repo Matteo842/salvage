@@ -19,10 +19,18 @@ everything, and you can point the backup at the new link in two clicks.
 - **Syncs on a timer.** Every N hours while the window is open, or through the
   Windows Task Scheduler while it is closed. No service, nothing left running:
   Windows starts Salvage with no window, it syncs, it quits.
+- **Keeps the builds too, if you want them.** Turn on release files, then tick
+  the files you want from the list (for example only the Windows build).
+  Salvage keeps the newest release and the newest pre-release. When a new one
+  comes out it is downloaded and checked against its sha256 (or its size, when
+  the host publishes no hash) before the old one is deleted. Works with GitHub,
+  GitLab and Gitea/Forgejo. You can keep only the releases, without mirror or
+  working copy.
 - **Follows a repo that moves.** Click the pencil, paste the new link. The
   folders on disk stay the same and the old link is kept in a history.
-- **Never deletes anything.** Removing a repo from the list leaves its files.
-  Re-cloning a working copy renames the old one to `Name.old-<date>`.
+- **Never deletes your backups.** Removing a repo from the list leaves its files.
+  Re-cloning a working copy renames the old one to `Name.old-<date>`. The only
+  thing ever deleted is an old release, once its replacement has passed the check.
 - **Shows its work.** Every git command and its output scrolls in the terminal
   behind the interface. Press `F2` to see it full screen.
 
@@ -31,6 +39,9 @@ On disk, under the backup folder you choose:
 ```
 Name-mirror.git/   bare mirror: all branches, all tags
 Name/              working copy, submodules included
+Name-releases/
+  latest/<tag>/      files of the newest release
+  prerelease/<tag>/  files of the newest pre-release, if newer than that
 ```
 
 Repos already in that folder are found and added on first run.
@@ -39,6 +50,7 @@ Repos already in that folder are found and added on first run.
 
 - Windows 10 or 11
 - [`git`](https://git-scm.com/download/win) in your `PATH`
+- `curl` for release files (it comes with Windows 10 and 11)
 
 ## Download
 

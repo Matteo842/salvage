@@ -29,6 +29,13 @@ pub struct Project {
     /// Links this repo used before, newest first.
     #[serde(default)]
     pub old_urls: Vec<String>,
+    /// Download the files attached to the repo's releases (builds, installers).
+    #[serde(default)]
+    pub releases: bool,
+    /// Release files to keep, by name with the version taken out
+    /// (see [`crate::releases::file_key`]).
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 impl Project {
@@ -39,7 +46,12 @@ impl Project {
     pub fn work_dir(&self, root: &Path) -> PathBuf {
         root.join(&self.name)
     }
+
+    pub fn releases_dir(&self, root: &Path) -> PathBuf {
+        root.join(format!("{}-releases", self.name))
+    }
 }
+
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -101,6 +113,8 @@ impl Config {
             last_sync: None,
             last_error: None,
             old_urls: Vec::new(),
+            releases: false,
+            files: Vec::new(),
         });
         id
     }

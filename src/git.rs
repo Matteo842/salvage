@@ -88,6 +88,11 @@ pub enum Event {
         detail: String,
     },
     Imported(Vec<Found>),
+    /// Files the newest releases offer, for the picker in the dialogs.
+    Files {
+        url: String,
+        result: Result<Vec<crate::releases::Choice>, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -114,8 +119,9 @@ impl Bus {
     }
 }
 
-fn git(dir: Option<&Path>) -> Command {
-    let mut c = Command::new("git");
+/// `git`, or `curl` for release files: both ship with what Salvage needs on Windows.
+fn tool(program: &str, dir: Option<&Path>) -> Command {
+    let mut c = Command::new(program);
     if let Some(d) = dir {
         c.current_dir(d);
     }
@@ -137,7 +143,7 @@ fn git(dir: Option<&Path>) -> Command {
 
 /// Quick silent query, e.g. reading a config value.
 fn query(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = git(Some(dir)).args(args).output().ok()?;
+    let out = tool("git", Some(dir)).args(args).output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -179,23 +185,32 @@ fn read_segments(mut r: impl Read, mut f: impl FnMut(String)) {
 }
 
 /// `Receiving objects:  45% (450/1000), 1.2 MiB` -> ("Receiving objects", 0.45)
-fn parse_progress(s: &str) -> Option<(String, f32)> {
-    let pct_at = s.find('%')?;
-    let colon = s[..pct_at].rfind(':')?;
-    let pct: f32 = s[colon + 1..pct_at].trim().parse().ok()?;
-    let phase = s[..colon].trim().trim_start_matches("remote:").trim();
+/// `########                  12.5%` (curl) -> ("Downloading", 0.125)
+pub(crate) fn parse_progress(s: &str) -> Option<(String, f32)> {
+    let head = &s[..s.find('%')?];
+    let (phase, num) = match head.rfind(':') {
+        Some(colon) => (head[..colon].trim().trim_start_matches("remote:").trim(), &head[colon + 1..]),
+        None => {
+            let (bar, num) = head.trim_end().rsplit_once(' ').unwrap_or(("", head));
+            if !bar.chars().all(|c| c == '#' || c == ' ') {
+                return None;
+            }
+            (tr("Downloading", "Download"), num)
+        }
+    };
+    let pct: f32 = num.trim().parse().ok()?;
     Some((phase.to_string(), (pct / 100.0).clamp(0.0, 1.0)))
 }
 
 fn is_error_line(s: &str) -> bool {
     let l = s.trim_start_matches("remote:").trim_start();
-    l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("Repository not found")
+    l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("Repository not found") || l.starts_with("curl:")
 }
 
-struct Done {
-    ok: bool,
-    stdout: String,
-    err: String,
+pub(crate) struct Done {
+    pub ok: bool,
+    pub stdout: String,
+    pub err: String,
 }
 
 /// Run one git command, streaming its output to the terminal.
@@ -208,11 +223,30 @@ fn run(
     timeout: Option<Duration>,
     echo_stdout: bool,
 ) -> Done {
-    bus.log(tag, LogKind::Cmd, format!("git {}", args.join(" ")));
-    let mut child = match git(dir).args(args).spawn() {
+    run_tool(bus, tag, id, "git", dir, args, timeout, echo_stdout)
+}
+
+/// Run one `curl` command the same way; used for release files.
+pub(crate) fn curl(bus: &Bus, tag: &str, id: Option<u64>, args: &[&str], timeout: Option<Duration>) -> Done {
+    run_tool(bus, tag, id, "curl", None, args, timeout, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_tool(
+    bus: &Bus,
+    tag: &str,
+    id: Option<u64>,
+    program: &str,
+    dir: Option<&Path>,
+    args: &[&str],
+    timeout: Option<Duration>,
+    echo_stdout: bool,
+) -> Done {
+    bus.log(tag, LogKind::Cmd, format!("{program} {}", args.join(" ")));
+    let mut child = match tool(program, dir).args(args).spawn() {
         Ok(c) => c,
         Err(e) => {
-            let msg = t!("could not start git: {e}", "git non parte: {e}");
+            let msg = t!("could not start {program}: {e}", "{program} non parte: {e}");
             bus.log(tag, LogKind::Err, msg.clone());
             return Done {
                 ok: false,
@@ -246,7 +280,8 @@ fn run(
             let mut last_err = String::new();
             let mut last_line = String::new();
             read_segments(err, |line| {
-                if line.is_empty() {
+                // curl's progress bar opens with a `#=#=#` / `##O#-#` animation.
+                if line.chars().all(|c| matches!(c, '#' | '=' | 'O' | '-' | ' ')) {
                     return;
                 }
                 if let Some((phase, pct)) = parse_progress(&line) {
@@ -354,7 +389,7 @@ pub fn check(bus: &Bus, p: &Project, root: &Path) -> Check {
     let tag = p.name.as_str();
     let mirror = p.mirror_dir(root);
     let work = p.work_dir(root);
-    let cloned = is_repo(&mirror) || is_repo(&work);
+    let cloned = is_repo(&mirror) || is_repo(&work) || (p.releases && p.releases_dir(root).is_dir());
 
     let done = run(bus, tag, None, None, &["ls-remote", &p.url], Some(Duration::from_secs(40)), false);
     if !done.ok {
@@ -483,6 +518,10 @@ pub fn sync(bus: &Bus, p: &Project, root: &Path, fresh_work: bool) -> Result<(),
             let target = dir.to_string_lossy().to_string();
             step(run(bus, tag, id, Some(root), &["clone", "--recursive", "--progress", &p.url, &target], None, true))?;
         }
+    }
+
+    if p.releases {
+        crate::releases::sync(bus, p, root)?;
     }
 
     bus.log(tag, LogKind::Good, tr("synced", "sincronizzato"));

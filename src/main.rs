@@ -9,6 +9,7 @@ mod headless;
 mod icon;
 mod model;
 mod paint;
+mod releases;
 mod term;
 mod theme;
 mod widgets;

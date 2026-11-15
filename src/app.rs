@@ -19,6 +19,7 @@ use crate::model::{self, ago, hours_label, name_from_url, now_ts, sanitize_name,
 use crate::paint::{self, Blip, Sig};
 use crate::term::{self, Row, Term};
 use crate::theme::*;
+use crate::releases;
 use crate::widgets::{self, button, field, toggle, Icon, Tone};
 
 const TITLE_H: f32 = 36.0;
@@ -78,6 +79,24 @@ enum Probe {
     Fail(String),
 }
 
+/// The release files a repo offers, as shown in the dialog picker. Each state
+/// remembers the link it is about, so a changed link reloads the list.
+enum Choices {
+    None,
+    Loading(String),
+    Ready(String, Vec<releases::Choice>),
+    Fail(String, String),
+}
+
+impl Choices {
+    fn url(&self) -> Option<&str> {
+        match self {
+            Choices::None => None,
+            Choices::Loading(u) | Choices::Ready(u, _) | Choices::Fail(u, _) => Some(u),
+        }
+    }
+}
+
 struct Dialog {
     kind: Kind,
     url: String,
@@ -86,6 +105,9 @@ struct Dialog {
     name_touched: bool,
     mirror: bool,
     work: bool,
+    releases: bool,
+    files: Vec<String>,
+    choices: Choices,
     fresh: bool,
     old_urls: Vec<String>,
     probe: Probe,
@@ -110,6 +132,9 @@ impl Dialog {
             name_touched: false,
             mirror: true,
             work: true,
+            releases: false,
+            files: Vec::new(),
+            choices: Choices::None,
             fresh: false,
             old_urls: Vec::new(),
             probe: Probe::None,
@@ -446,6 +471,16 @@ impl App {
                     }
                 }
             }
+            Event::Files { url, result } => {
+                if let Some(d) = &mut self.dialog {
+                    if matches!(&d.choices, Choices::Loading(u) if *u == url) {
+                        d.choices = match result {
+                            Ok(list) => Choices::Ready(url, list),
+                            Err(e) => Choices::Fail(url, e),
+                        };
+                    }
+                }
+            }
             Event::Imported(found) => {
                 let mut added = Vec::new();
                 for f in found {
@@ -536,6 +571,8 @@ impl App {
         d.name = p.name.clone();
         d.mirror = p.mirror;
         d.work = p.work;
+        d.releases = p.releases;
+        d.files = p.files.clone();
         d.old_urls = p.old_urls.clone();
         self.dialog = Some(d);
     }
@@ -564,10 +601,16 @@ impl App {
                     d.error = tr("The folder name is missing.", "Manca il nome della cartella.").into();
                 } else if self.cfg.has_name(&name) {
                     d.error = t!("There is already a repo called {name}: pick another name.", "C'è già un repo chiamato {name}: scegli un altro nome.");
-                } else if !d.mirror && !d.work {
-                    d.error = tr("Pick at least one of the two copies to keep.", "Scegli almeno una delle due copie da tenere.").into();
+                } else if !d.mirror && !d.work && !d.releases {
+                    d.error = tr("Pick at least one thing to keep.", "Scegli almeno una cosa da tenere.").into();
+                } else if d.releases && d.files.is_empty() {
+                    d.error = tr("Pick at least one release file.", "Scegli almeno un file delle release.").into();
                 } else {
                     let id = self.cfg.add(name, url, d.mirror, d.work);
+                    if let Some(p) = self.cfg.projects.iter_mut().find(|p| p.id == id) {
+                        p.releases = d.releases;
+                        p.files = d.files.clone();
+                    }
                     self.save();
                     self.queue_sync(id, false);
                     return true;
@@ -580,15 +623,19 @@ impl App {
                     d.error = tr("The repo link is missing.", "Manca il link del repo.").into();
                     return false;
                 }
-                if !d.mirror && !d.work {
-                    d.error = tr("Pick at least one of the two copies to keep.", "Scegli almeno una delle due copie da tenere.").into();
+                if !d.mirror && !d.work && !d.releases {
+                    d.error = tr("Pick at least one thing to keep.", "Scegli almeno una cosa da tenere.").into();
+                    return false;
+                }
+                if d.releases && d.files.is_empty() {
+                    d.error = tr("Pick at least one release file.", "Scegli almeno un file delle release.").into();
                     return false;
                 }
                 let Some(p) = self.cfg.projects.iter_mut().find(|p| p.id == id) else {
                     return true;
                 };
                 let moved = url != p.url;
-                let changed = moved || d.fresh || d.mirror != p.mirror || d.work != p.work;
+                let changed = moved || d.fresh || d.mirror != p.mirror || d.work != p.work || d.releases != p.releases || (d.releases && d.files != p.files);
                 if moved {
                     let old = std::mem::replace(&mut p.url, url.clone());
                     p.old_urls.retain(|u| *u != url && *u != old);
@@ -601,6 +648,8 @@ impl App {
                 }
                 p.mirror = d.mirror;
                 p.work = d.work;
+                p.releases = d.releases;
+                p.files = d.files.clone();
                 self.save();
                 if changed {
                     self.queue_sync(id, d.fresh);
@@ -651,13 +700,20 @@ impl App {
         let Some(mut d) = self.dialog.take() else {
             return;
         };
+        let url = d.url.trim().to_string();
+        let typing = ctx.memory(|m| m.has_focus(Id::new("dlg_url")));
+        if d.releases && !url.is_empty() && !typing && d.choices.url() != Some(url.as_str()) {
+            d.choices = Choices::Loading(url.clone());
+            let bus = self.bus.clone();
+            std::thread::spawn(move || releases::list_files(&bus, &url));
+        }
         let mut out = Outcome::None;
         let screen = ctx.screen_rect();
         let body = Rect::from_min_max(pos2(screen.left(), screen.top() + TITLE_H + 1.0), screen.max);
         let moved = d.kind != Kind::Add && d.url.trim() != d.original_url;
         let height = match d.kind {
-            Kind::Add => 336.0,
-            Kind::Edit(_) => 384.0 + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
+            Kind::Add => 336.0 + releases_h(&d),
+            Kind::Edit(_) => 384.0 + releases_h(&d) + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
             Kind::Settings => 404.0,
         };
 
@@ -704,6 +760,7 @@ impl App {
                         ui.add_space(2.0);
                         toggle(&mut ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
                         toggle(&mut ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
+                        releases_ui(&mut ui, &mut d, w);
                     }
                     Kind::Edit(_) => {
                         ui.label(egui::RichText::new(&d.name).font(mono(16.0)).color(FOAM));
@@ -726,6 +783,7 @@ impl App {
                         ui.add_space(2.0);
                         toggle(&mut ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
                         toggle(&mut ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
+                        releases_ui(&mut ui, &mut d, w);
                         if d.work {
                             toggle(&mut ui, &mut d.fresh, tr("re-clone the working copy from scratch (the old one stays as .old)", "riscarica la copia di lavoro da zero (la vecchia resta come .old)"));
                         }
@@ -1235,10 +1293,13 @@ impl App {
                 if let Some(p) = self.project(id) {
                     let work = p.work_dir(&self.cfg.root);
                     let mirror = p.mirror_dir(&self.cfg.root);
+                    let releases = p.releases_dir(&self.cfg.root);
                     if work.exists() {
                         open_folder(&work);
                     } else if mirror.exists() {
                         open_folder(&mirror);
+                    } else if releases.exists() {
+                        open_folder(&releases);
                     } else {
                         open_folder(&self.cfg.root);
                     }
@@ -1380,4 +1441,65 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
     }
+}
+
+const PICK_ROWS: usize = 6;
+
+/// Dialog height taken by the release toggle and, when on, its picker.
+fn releases_h(d: &Dialog) -> f32 {
+    if !d.releases {
+        return 32.0;
+    }
+    let list = match &d.choices {
+        Choices::Ready(_, list) => 30.0 * list.len().clamp(1, PICK_ROWS) as f32,
+        _ => 22.0,
+    };
+    32.0 + list + 8.0 + 48.0
+}
+
+/// Release files toggle and, when on, one switch per file the newest release has.
+fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32) {
+    toggle(ui, &mut d.releases, tr("release files: builds and installers", "file delle release: build e installer"));
+    if !d.releases {
+        return;
+    }
+    let note = |ui: &mut Ui, text: &str, col: Color32| {
+        ui.label(egui::RichText::new(text).font(mono(11.5)).color(col));
+    };
+    match &d.choices {
+        Choices::None => note(ui, tr("paste the link to see the files", "incolla il link per vedere i file"), KELP),
+        Choices::Loading(_) => note(ui, tr("reading the releases...", "leggo le release..."), KELP),
+        Choices::Fail(_, e) => note(ui, &fit(e, 72), WRECK),
+        Choices::Ready(_, list) => {
+            let rows = list.len().min(PICK_ROWS);
+            egui::ScrollArea::vertical()
+                .id_salt("release_files")
+                .max_height(30.0 * rows as f32)
+                .min_scrolled_height(30.0 * rows as f32)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.set_width(w - 12.0);
+                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                    for c in list {
+                        let mut on = d.files.contains(&c.key);
+                        let label = if c.pre_only { format!("{}  (pre-release)", c.name) } else { c.name.clone() };
+                        if toggle(ui, &mut on, &label).changed() {
+                            d.files.retain(|k| *k != c.key);
+                            if on {
+                                d.files.push(c.key.clone());
+                            }
+                        }
+                    }
+                });
+        }
+    }
+    ui.add_space(4.0);
+    note(
+        ui,
+        tr(
+            "Only the newest release is kept, in latest/, and the newest pre-release in prerelease/. A new one is checked (sha256) before the old one is deleted.",
+            "Si tiene solo l'ultima release, in latest/, e l'ultima pre-release in prerelease/. La nuova viene controllata (sha256) prima di cancellare la vecchia.",
+        ),
+        DEEP,
+    );
 }
