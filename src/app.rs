@@ -670,13 +670,13 @@ impl App {
                 let moved = root != self.cfg.root;
                 if d.task && (!self.cfg.scheduled_task || d.hours != self.cfg.interval_hours) {
                     if let Err(e) = headless::schedule(d.hours) {
-                        d.error = fit(&t!("Task Scheduler: {e}", "Utilità di pianificazione: {e}"), 72);
+                        d.error = fit(&format!("{}: {e}", headless::scheduler_text()), 72);
                         return false;
                     }
-                    self.say(LogKind::Good, t!("Windows scheduled task set: every {}", "attività pianificata in Windows: ogni {}", hours_label(d.hours)));
+                    self.say(LogKind::Good, format!("{} {}", headless::set_text(), hours_label(d.hours)));
                 } else if !d.task && self.cfg.scheduled_task {
                     match headless::unschedule() {
-                        Ok(()) => self.say(LogKind::Info, tr("Windows scheduled task removed", "attività pianificata rimossa da Windows")),
+                        Ok(()) => self.say(LogKind::Info, headless::removed_text()),
                         Err(e) => self.say(LogKind::Err, t!("scheduled task not removed: {e}", "attività pianificata non rimossa: {e}")),
                     }
                 }
@@ -816,9 +816,9 @@ impl App {
                             toggle(ui, &mut d.auto, tr("sync everything automatically, every", "sincronizza tutto da solo, ogni"));
                             widgets::interval_stepper(ui, &mut d.hours);
                         });
-                        toggle(&mut ui, &mut d.task, tr("also while the app is closed, via Windows Task Scheduler", "anche ad app chiusa, con l'Utilità di pianificazione di Windows"));
+                        toggle(&mut ui, &mut d.task, &headless::toggle_text());
                         toggle(&mut ui, &mut d.check_start, tr("check the links at startup", "controlla i link all'avvio"));
-                        note(&mut ui, tr("While closed, Windows starts Salvage with no window, syncs and quits: nothing stays running.", "Ad app chiusa Windows avvia Salvage senza finestra, sincronizza e lo richiude: niente resta acceso."), DEEP());
+                        note(&mut ui, &headless::note_text(), DEEP());
                         ui.add_space(6.0);
                         if toggle(&mut ui, &mut d.oled, tr("OLED theme: pure black and white", "tema OLED: solo bianco e nero")).changed() {
                             theme::set_oled(d.oled);
@@ -1404,12 +1404,20 @@ impl App {
 }
 
 fn open_folder(path: &std::path::Path) {
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener).arg(path).spawn();
 }
 
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [5.0 / 255.0, 13.0 / 255.0, 20.0 / 255.0, 1.0]
+        let c = ABYSS();
+        [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, 1.0]
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

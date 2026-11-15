@@ -21,9 +21,20 @@ fn main() -> eframe::Result {
         headless::run();
         return Ok(());
     }
+    // Packaging aid: the Linux tarball ships this PNG for its .desktop entry.
+    if let Some(path) = std::env::args().skip_while(|a| a != "--write-icon").nth(1) {
+        let n = 256;
+        if let Err(e) = image::save_buffer(&path, &icon::icon_rgba(n), n as u32, n as u32, image::ColorType::Rgba8) {
+            eprintln!("{path}: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Salvage")
+            // Matches salvage.desktop, so Linux docks show the right icon.
+            .with_app_id("salvage")
             .with_inner_size([1200.0, 780.0])
             .with_min_inner_size([1000.0, 640.0])
             .with_decorations(false)

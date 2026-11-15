@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Salvage
+Comment=Keeps mirrors and working copies of git repos that might vanish up to date
+Exec=salvage
+Icon=salvage
+Terminal=false
+Categories=Development;RevisionControl;Utility;
+StartupWMClass=salvage

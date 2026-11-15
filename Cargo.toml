@@ -1,6 +1,6 @@
 [package]
 name = "salvage"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Keeps mirrors and working copies of git repos that might vanish up to date"
 license = "MIT"
@@ -13,6 +13,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.10"
+
+# winit needs a display backend on Linux; Windows ignores these.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "=0.31.1", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 
 [build-dependencies]
 winresource = "0.1"

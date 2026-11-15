@@ -61,7 +61,8 @@ pub struct Config {
     pub check_on_start: bool,
     #[serde(default)]
     pub last_sync_all: Option<i64>,
-    /// A Windows scheduled task runs `--sync` while the window is closed.
+    /// A scheduled job (Windows Task Scheduler, or a systemd user timer on
+    /// Linux) runs `--sync` while the window is closed.
     #[serde(default)]
     pub scheduled_task: bool,
     /// Pure black and white look instead of the deep-water palette.
@@ -139,15 +140,27 @@ pub fn config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("SALVAGE_CONFIG") {
         return PathBuf::from(p);
     }
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
+    #[cfg(windows)]
+    let (base, dir) = (std::env::var_os("APPDATA").map(PathBuf::from), "Salvage");
+    #[cfg(not(windows))]
+    let (base, dir) = (config_home(), "salvage");
+    let base = base
         .or_else(|| {
             std::env::current_exe()
                 .ok()
                 .and_then(|e| e.parent().map(Path::to_path_buf))
         })
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Salvage").join("config.json")
+    base.join(dir).join("config.json")
+}
+
+/// `$XDG_CONFIG_HOME`, or `~/.config`.
+#[cfg(not(windows))]
+pub fn config_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 }
 
 /// Held by whichever Salvage is working (window or `--sync`), so the two never
@@ -164,11 +177,16 @@ pub fn lock() -> Option<std::fs::File> {
         use std::os::windows::fs::OpenOptionsExt;
         open.share_mode(0);
     }
-    open.open(path).ok()
+    let file = open.open(path).ok()?;
+    // Elsewhere opening never fails on its own: take an advisory lock instead.
+    #[cfg(not(windows))]
+    file.try_lock().ok()?;
+    Some(file)
 }
 
 pub fn default_root() -> PathBuf {
-    std::env::var_os("USERPROFILE")
+    let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(home)
         .map(|h| PathBuf::from(h).join("Salvage"))
         .unwrap_or_else(|| PathBuf::from("Salvage"))
 }
