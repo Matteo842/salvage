@@ -18,7 +18,7 @@ use crate::lang::{branches, repos, tr};
 use crate::model::{self, ago, hours_label, name_from_url, now_ts, sanitize_name, short_url, Config, Project};
 use crate::paint::{self, Blip, Sig};
 use crate::term::{self, Row, Term};
-use crate::theme::*;
+use crate::theme::{self, *};
 use crate::releases;
 use crate::widgets::{self, button, field, toggle, Icon, Tone};
 
@@ -119,6 +119,7 @@ struct Dialog {
     auto: bool,
     task: bool,
     check_start: bool,
+    oled: bool,
     focus: bool,
 }
 
@@ -146,6 +147,7 @@ impl Dialog {
             auto: true,
             task: false,
             check_start: true,
+            oled: false,
             focus: true,
         }
     }
@@ -222,7 +224,6 @@ fn phase_label(phase: &str, pct: Option<f32>) -> String {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        apply(&cc.egui_ctx);
         let cfg_path = model::config_path();
         let args: Vec<String> = std::env::args().collect();
         let arg_root = args
@@ -241,6 +242,9 @@ impl App {
                 root_changed = true;
             }
         }
+
+        theme::set_oled(cfg.oled);
+        apply(&cc.egui_ctx);
 
         if cfg.auto_sync && cfg.last_sync_all.is_none() {
             cfg.last_sync_all = Some(now_ts());
@@ -513,32 +517,32 @@ impl App {
         match rt.map(|r| r.busy).unwrap_or_default() {
             Busy::Syncing => {
                 let rt = rt.expect("syncing implies runtime");
-                return (Sig::Working, phase_label(&rt.phase, rt.pct), FLARE);
+                return (Sig::Working, phase_label(&rt.phase, rt.pct), FLARE());
             }
-            Busy::Queued => return (Sig::Listening, tr("queued", "in coda").into(), KELP),
-            Busy::Checking => return (Sig::Listening, tr("listening", "ascolto il link").into(), KELP),
+            Busy::Queued => return (Sig::Listening, tr("queued", "in coda").into(), KELP()),
+            Busy::Checking => return (Sig::Listening, tr("listening", "ascolto il link").into(), KELP()),
             Busy::Idle => {}
         }
         let failed = p.last_error.as_ref().map(|e| t!("sync failed: {e}", "sincronizzazione fallita: {e}"));
         match rt.and_then(|r| r.check.as_ref()) {
             None => match failed {
-                Some(f) => (Sig::Unknown, f, WRECK),
-                None => (Sig::Unknown, String::new(), KELP),
+                Some(f) => (Sig::Unknown, f, WRECK()),
+                None => (Sig::Unknown, String::new(), KELP()),
             },
             Some(c) if !c.live => (
                 Sig::Lost,
                 t!("no answer: {}", "non risponde: {}", c.error.as_deref().unwrap_or(tr("unknown reason", "motivo sconosciuto"))),
-                WRECK,
+                WRECK(),
             ),
             Some(c) => {
                 if let Some(f) = failed {
-                    (Sig::Behind, f, WRECK)
+                    (Sig::Behind, f, WRECK())
                 } else if !c.cloned {
-                    (Sig::Behind, tr("to download", "da scaricare").into(), FLARE)
+                    (Sig::Behind, tr("to download", "da scaricare").into(), FLARE())
                 } else if c.behind > 0 {
-                    (Sig::Behind, t!("{} to update", "{} da aggiornare", branches(c.behind)), FLARE)
+                    (Sig::Behind, t!("{} to update", "{} da aggiornare", branches(c.behind)), FLARE())
                 } else {
-                    (Sig::Live, tr("up to date", "allineato").into(), PING)
+                    (Sig::Live, tr("up to date", "allineato").into(), PING())
                 }
             }
         }
@@ -584,6 +588,7 @@ impl App {
         d.auto = self.cfg.auto_sync;
         d.task = self.cfg.scheduled_task;
         d.check_start = self.cfg.check_on_start;
+        d.oled = self.cfg.oled;
         d.focus = false;
         self.dialog = Some(d);
     }
@@ -683,6 +688,7 @@ impl App {
                 }
                 self.cfg.auto_sync = d.auto;
                 self.cfg.check_on_start = d.check_start;
+                self.cfg.oled = d.oled;
                 self.save();
                 if moved {
                     for rt in self.rt.values_mut() {
@@ -715,7 +721,7 @@ impl App {
         let height = match d.kind {
             Kind::Add => 336.0 + releases_h(&d),
             Kind::Edit(_) => 384.0 + releases_h(&d) + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
-            Kind::Settings => 404.0,
+            Kind::Settings => 434.0,
         };
 
         egui::Area::new(Id::new("dialog"))
@@ -724,7 +730,7 @@ impl App {
             .show(ctx, |ui| {
                 let scrim = ui.allocate_rect(body, Sense::click());
                 let p = ui.painter().with_clip_rect(body);
-                p.rect_filled(body, 0, alpha(ABYSS, 0.72));
+                p.rect_filled(body, 0, alpha(ABYSS(), 0.72));
                 let rect = Rect::from_center_size(body.center(), vec2(580.0, height));
                 paint::solid(&p, rect);
                 if scrim.clicked() && !ctx.pointer_interact_pos().is_some_and(|q| rect.contains(q)) {
@@ -741,8 +747,8 @@ impl App {
 
                 match d.kind {
                     Kind::Add => {
-                        ui.label(egui::RichText::new(tr("Add a repo", "Aggiungi un repo")).font(mono(16.0)).color(FOAM));
-                        note(&mut ui, tr("Paste the git link. GitHub, GitLab, Gitea or any other host works.", "Incolla il link git. Va bene GitHub, GitLab, Gitea o qualsiasi altro host."), KELP);
+                        ui.label(egui::RichText::new(tr("Add a repo", "Aggiungi un repo")).font(mono(16.0)).color(FOAM()));
+                        note(&mut ui, tr("Paste the git link. GitHub, GitLab, Gitea or any other host works.", "Incolla il link git. Va bene GitHub, GitLab, Gitea o qualsiasi altro host."), KELP());
                         ui.add_space(6.0);
                         let r = field(&mut ui, Id::new("dlg_url"), &mut d.url, tr("https://host/user/repo", "https://host/utente/repo"), w);
                         if d.focus {
@@ -764,18 +770,18 @@ impl App {
                         releases_ui(&mut ui, &mut d, w);
                     }
                     Kind::Edit(_) => {
-                        ui.label(egui::RichText::new(&d.name).font(mono(16.0)).color(FOAM));
-                        note(&mut ui, tr("If the repo moved, paste the new link here. The folders on disk stay the same.", "Se il repo si è spostato, incolla qui il link nuovo. Le cartelle su disco restano le stesse."), KELP);
+                        ui.label(egui::RichText::new(&d.name).font(mono(16.0)).color(FOAM()));
+                        note(&mut ui, tr("If the repo moved, paste the new link here. The folders on disk stay the same.", "Se il repo si è spostato, incolla qui il link nuovo. Le cartelle su disco restano le stesse."), KELP());
                         ui.add_space(6.0);
                         if field(&mut ui, Id::new("dlg_url"), &mut d.url, tr("https://host/user/repo", "https://host/utente/repo"), w).changed() {
                             d.probe = Probe::None;
                         }
                         if !d.old_urls.is_empty() {
-                            note(&mut ui, tr("links used before (click to restore)", "link usati prima (clicca per rimetterlo)"), DEEP);
+                            note(&mut ui, tr("links used before (click to restore)", "link usati prima (clicca per rimetterlo)"), DEEP());
                             for (i, old) in d.old_urls.clone().iter().take(4).enumerate() {
                                 let (r, _) = ui.allocate_exact_size(vec2(w, 12.0), Sense::hover());
                                 let text = fit(&short_url(old), 68);
-                                if widgets::link(&mut ui, Id::new(("old_url", i)), r.min, text, 11.5, KELP).clicked() {
+                                if widgets::link(&mut ui, Id::new(("old_url", i)), r.min, text, 11.5, KELP()).clicked() {
                                     d.url = old.clone();
                                     d.probe = Probe::None;
                                 }
@@ -789,12 +795,12 @@ impl App {
                             toggle(&mut ui, &mut d.fresh, tr("re-clone the working copy from scratch (the old one stays as .old)", "riscarica la copia di lavoro da zero (la vecchia resta come .old)"));
                         }
                         if moved {
-                            note(&mut ui, tr("The current link moves to the history. Mirror and working copy will follow the new one.", "Il link attuale passa nello storico. Mirror e copia di lavoro seguiranno quello nuovo."), FLARE);
+                            note(&mut ui, tr("The current link moves to the history. Mirror and working copy will follow the new one.", "Il link attuale passa nello storico. Mirror e copia di lavoro seguiranno quello nuovo."), FLARE());
                         }
                     }
                     Kind::Settings => {
-                        ui.label(egui::RichText::new(tr("Settings", "Impostazioni")).font(mono(16.0)).color(FOAM));
-                        note(&mut ui, tr("Folder where mirrors and working copies live.", "Cartella dove vivono mirror e copie di lavoro."), KELP);
+                        ui.label(egui::RichText::new(tr("Settings", "Impostazioni")).font(mono(16.0)).color(FOAM()));
+                        note(&mut ui, tr("Folder where mirrors and working copies live.", "Cartella dove vivono mirror e copie di lavoro."), KELP());
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             field(ui, Id::new("dlg_root"), &mut d.root, "D:\\backup", w - 108.0);
@@ -812,7 +818,12 @@ impl App {
                         });
                         toggle(&mut ui, &mut d.task, tr("also while the app is closed, via Windows Task Scheduler", "anche ad app chiusa, con l'Utilità di pianificazione di Windows"));
                         toggle(&mut ui, &mut d.check_start, tr("check the links at startup", "controlla i link all'avvio"));
-                        note(&mut ui, tr("While closed, Windows starts Salvage with no window, syncs and quits: nothing stays running.", "Ad app chiusa Windows avvia Salvage senza finestra, sincronizza e lo richiude: niente resta acceso."), DEEP);
+                        note(&mut ui, tr("While closed, Windows starts Salvage with no window, syncs and quits: nothing stays running.", "Ad app chiusa Windows avvia Salvage senza finestra, sincronizza e lo richiude: niente resta acceso."), DEEP());
+                        ui.add_space(6.0);
+                        if toggle(&mut ui, &mut d.oled, tr("OLED theme: pure black and white", "tema OLED: solo bianco e nero")).changed() {
+                            theme::set_oled(d.oled);
+                            apply(ctx);
+                        }
                     }
                 }
 
@@ -820,13 +831,13 @@ impl App {
                 let line_y = inner.bottom() - 58.0;
                 if !d.error.is_empty() {
                     ui.painter()
-                        .text(pos2(inner.left(), line_y), Align2::LEFT_TOP, &d.error, mono(11.5), WRECK);
+                        .text(pos2(inner.left(), line_y), Align2::LEFT_TOP, &d.error, mono(11.5), WRECK());
                 } else {
                     let (sig, text, col) = match &d.probe {
-                        Probe::None => (Sig::Unknown, String::new(), KELP),
-                        Probe::Running => (Sig::Listening, tr("listening", "ascolto il link").to_string(), KELP),
-                        Probe::Ok(t) => (Sig::Live, fit(t, 66), PING),
-                        Probe::Fail(t) => (Sig::Lost, fit(&t!("no answer: {t}", "non risponde: {t}"), 66), WRECK),
+                        Probe::None => (Sig::Unknown, String::new(), KELP()),
+                        Probe::Running => (Sig::Listening, tr("listening", "ascolto il link").to_string(), KELP()),
+                        Probe::Ok(t) => (Sig::Live, fit(t, 66), PING()),
+                        Probe::Fail(t) => (Sig::Lost, fit(&t!("no answer: {t}", "non risponde: {t}"), 66), WRECK()),
                     };
                     if !text.is_empty() {
                         paint::ping(ui.painter(), pos2(inner.left() + 9.0, line_y + 8.0), sig, self.now, 3);
@@ -884,7 +895,13 @@ impl App {
 
         match out {
             Outcome::None => self.dialog = Some(d),
-            Outcome::Close => {}
+            Outcome::Close => {
+                // Settings preview the theme live; cancelling puts the saved one back.
+                if d.kind == Kind::Settings && theme::oled() != self.cfg.oled {
+                    theme::set_oled(self.cfg.oled);
+                    apply(ctx);
+                }
+            }
             Outcome::Submit => {
                 if !self.submit(&mut d) {
                     self.dialog = Some(d);
@@ -934,7 +951,7 @@ impl App {
     // ---- main surface ----------------------------------------------------
 
     fn title_bar(&self, ui: &mut Ui, p: &Painter, rect: Rect, acts: &mut Vec<Act>) {
-        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, LINE));
+        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, LINE()));
         let drag = ui.interact(rect, Id::new("title_drag"), Sense::click_and_drag());
         if drag.double_clicked() {
             acts.push(Act::ToggleMax);
@@ -943,11 +960,11 @@ impl App {
         }
         let cy = rect.center().y;
         let mark = pos2(rect.left() + 22.0, cy);
-        p.circle_stroke(mark, 6.0, Stroke::new(1.2, PING));
-        p.circle_filled(mark, 1.8, PING);
-        let name = p.text(pos2(rect.left() + 38.0, cy), Align2::LEFT_CENTER, "salvage", mono(12.5), FOAM);
+        p.circle_stroke(mark, 6.0, Stroke::new(1.2, PING()));
+        p.circle_filled(mark, 1.8, PING());
+        let name = p.text(pos2(rect.left() + 38.0, cy), Align2::LEFT_CENTER, "salvage", mono(12.5), FOAM());
         let root = self.cfg.root.display().to_string();
-        if widgets::link(ui, Id::new("root_link"), pos2(name.right() + 18.0, cy - 7.0), root, 11.5, DEEP)
+        if widgets::link(ui, Id::new("root_link"), pos2(name.right() + 18.0, cy - 7.0), root, 11.5, DEEP())
             .on_hover_text(tr("open the backup folder", "apri la cartella dei backup"))
             .clicked()
         {
@@ -959,17 +976,17 @@ impl App {
             x -= w;
             Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(w, 28.0))
         };
-        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_close"), Icon::Close, tr("close", "chiudi"), WRECK).clicked() {
+        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_close"), Icon::Close, tr("close", "chiudi"), WRECK()).clicked() {
             acts.push(Act::Close);
         }
-        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_max"), Icon::Max, tr("maximize", "ingrandisci"), FOAM).clicked() {
+        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_max"), Icon::Max, tr("maximize", "ingrandisci"), FOAM()).clicked() {
             acts.push(Act::ToggleMax);
         }
-        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_min"), Icon::Min, tr("minimize", "riduci a icona"), FOAM).clicked() {
+        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_min"), Icon::Min, tr("minimize", "riduci a icona"), FOAM()).clicked() {
             acts.push(Act::Minimize);
         }
         slot(14.0);
-        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_set"), Icon::Sliders, tr("settings", "impostazioni"), FOAM).clicked() {
+        if widgets::icon_button_at(ui, slot(34.0), Id::new("w_set"), Icon::Sliders, tr("settings", "impostazioni"), FOAM()).clicked() {
             acts.push(Act::Settings);
         }
         let tip = if self.term_full { tr("back to the list (F2)", "torna alla lista (F2)") } else { tr("full-screen terminal (F2)", "terminale a tutto schermo (F2)") };
@@ -977,10 +994,10 @@ impl App {
         if self.term_full {
             p.line_segment(
                 [pos2(term_slot.left() + 8.0, rect.bottom() - 1.0), pos2(term_slot.right() - 8.0, rect.bottom() - 1.0)],
-                Stroke::new(2.0, PING),
+                Stroke::new(2.0, PING()),
             );
         }
-        if widgets::icon_button_at(ui, term_slot, Id::new("w_term"), Icon::Term, tip, PING).clicked() {
+        if widgets::icon_button_at(ui, term_slot, Id::new("w_term"), Icon::Term, tip, PING()).clicked() {
             acts.push(Act::ToggleTerm);
         }
     }
@@ -994,7 +1011,7 @@ impl App {
             Align2::LEFT_TOP,
             tr("keeps the repos that might vanish safe", "tiene in salvo i repo che potrebbero sparire"),
             mono(10.5),
-            KELP,
+            KELP(),
         );
         y += 32.0;
 
@@ -1038,9 +1055,9 @@ impl App {
         let resp = ui
             .interact(hit, Id::new("countdown"), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
-        let col = if resp.hovered() { FOAM } else { mix(KELP, FOAM, 0.55) };
+        let col = if resp.hovered() { FOAM() } else { mix(KELP(), FOAM(), 0.55) };
         p.text(pos2(c.x, y), Align2::CENTER_TOP, first, mono(12.0), col);
-        p.text(pos2(c.x, y + 19.0), Align2::CENTER_TOP, second, mono(10.5), DEEP);
+        p.text(pos2(c.x, y + 19.0), Align2::CENTER_TOP, second, mono(10.5), DEEP());
         if resp.clicked() {
             acts.push(Act::Settings);
         }
@@ -1106,19 +1123,19 @@ impl App {
             ui.interact(hit, Id::new(("tally", key)), Sense::hover()).on_hover_text(tip);
             *x = r.right() + 22.0;
         };
-        put(&mut x, repos(self.cfg.projects.len()), FOAM);
+        put(&mut x, repos(self.cfg.projects.len()), FOAM());
         if live > 0 {
-            put(&mut x, format!("{live} online"), PING);
+            put(&mut x, format!("{live} online"), PING());
         }
         if todo > 0 {
-            mark(&mut ui, &mut x, Icon::Down, todo, FLARE, "todo", t!("{todo} to update", "{todo} da aggiornare"));
+            mark(&mut ui, &mut x, Icon::Down, todo, FLARE(), "todo", t!("{todo} to update", "{todo} da aggiornare"));
         }
         if lost > 0 {
             let tip = if lost == 1 { tr("1 does not answer", "1 non risponde").to_string() } else { t!("{lost} do not answer", "{lost} non rispondono") };
-            mark(&mut ui, &mut x, Icon::Skull, lost, WRECK, "lost", tip);
+            mark(&mut ui, &mut x, Icon::Skull, lost, WRECK(), "lost", tip);
         }
         ui.painter()
-            .line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, LINE));
+            .line_segment([head.left_bottom(), head.right_bottom()], Stroke::new(1.0, LINE()));
 
         let list = Rect::from_min_max(pos2(rect.left() + 1.0, head.bottom() + 1.0), rect.max - vec2(1.0, 1.0));
         let mut lui = ui.new_child(UiBuilder::new().max_rect(list).id_salt("list"));
@@ -1138,13 +1155,13 @@ impl App {
     fn empty_state(&self, ui: &mut Ui, area: Rect, acts: &mut Vec<Act>) {
         let c = area.center() - vec2(0.0, 40.0);
         ui.painter()
-            .text(c, Align2::CENTER_CENTER, tr("The list is empty.", "La lista è vuota."), mono(15.0), FOAM);
+            .text(c, Align2::CENTER_CENTER, tr("The list is empty.", "La lista è vuota."), mono(15.0), FOAM());
         ui.painter().text(
             c + vec2(0.0, 26.0),
             Align2::CENTER_CENTER,
             tr("Add a git link, or look for repos already in the folder.", "Aggiungi un link git, oppure cerca i repo già presenti nella cartella."),
             mono(11.5),
-            KELP,
+            KELP(),
         );
         let bar = Rect::from_center_size(c + vec2(0.0, 70.0), vec2(360.0, 32.0));
         ui.allocate_new_ui(
@@ -1167,7 +1184,7 @@ impl App {
         }
         let p = ui.painter().clone();
         if ui.rect_contains_pointer(rect) {
-            p.rect_filled(rect, 0, alpha(FOAM, 0.028));
+            p.rect_filled(rect, 0, alpha(FOAM(), 0.028));
         }
         let (sig, word, word_col) = self.status(pr);
         let rt = self.rt.get(&pr.id);
@@ -1177,7 +1194,7 @@ impl App {
         let actions_left = rect.right() - 18.0 - 3.0 * 32.0;
         let text_right = actions_left - 16.0;
 
-        let name = p.text(pos2(x, rect.top() + 12.0), Align2::LEFT_TOP, &pr.name, mono(14.5), FOAM);
+        let name = p.text(pos2(x, rect.top() + 12.0), Align2::LEFT_TOP, &pr.name, mono(14.5), FOAM());
         let room = ((text_right - name.right() - 14.0) / 7.0).max(0.0) as usize;
         p.text(
             pos2(name.right() + 14.0, rect.top() + 15.5),
@@ -1198,10 +1215,10 @@ impl App {
                 meta.push_str(&format!("   {h}"));
             }
         }
-        let meta_rect = p.text(pos2(text_right, rect.top() + 38.0), Align2::RIGHT_TOP, meta, mono(11.0), DEEP);
+        let meta_rect = p.text(pos2(text_right, rect.top() + 38.0), Align2::RIGHT_TOP, meta, mono(11.0), DEEP());
         let room = ((meta_rect.left() - 18.0 - x) / 6.95).max(8.0) as usize;
         let shown = fit(&short_url(&pr.url), room);
-        let url = widgets::link(ui, Id::new(("row_url", pr.id)), pos2(x, rect.top() + 37.5), shown, 11.5, KELP);
+        let url = widgets::link(ui, Id::new(("row_url", pr.id)), pos2(x, rect.top() + 37.5), shown, 11.5, KELP());
         if url.clicked() {
             if let Some(web) = model::web_url(&pr.url) {
                 acts.push(Act::OpenUrl(web));
@@ -1209,20 +1226,20 @@ impl App {
         }
 
         let slot = |i: f32| Rect::from_min_size(pos2(actions_left + i * 32.0, rect.center().y - 15.0), vec2(30.0, 30.0));
-        if widgets::icon_button_at(ui, slot(0.0), Id::new(("row_sync", pr.id)), Icon::Sync, tr("sync now", "sincronizza adesso"), FLARE).clicked() {
+        if widgets::icon_button_at(ui, slot(0.0), Id::new(("row_sync", pr.id)), Icon::Sync, tr("sync now", "sincronizza adesso"), FLARE()).clicked() {
             acts.push(Act::Sync(pr.id));
         }
-        if widgets::icon_button_at(ui, slot(1.0), Id::new(("row_edit", pr.id)), Icon::Edit, tr("edit or change link", "modifica o cambia link"), FOAM).clicked() {
+        if widgets::icon_button_at(ui, slot(1.0), Id::new(("row_edit", pr.id)), Icon::Edit, tr("edit or change link", "modifica o cambia link"), FOAM()).clicked() {
             acts.push(Act::Edit(pr.id));
         }
-        if widgets::icon_button_at(ui, slot(2.0), Id::new(("row_dir", pr.id)), Icon::Folder, tr("open folder", "apri la cartella"), FOAM).clicked() {
+        if widgets::icon_button_at(ui, slot(2.0), Id::new(("row_dir", pr.id)), Icon::Folder, tr("open folder", "apri la cartella"), FOAM()).clicked() {
             acts.push(Act::OpenDir(pr.id));
         }
 
         let end = rect.right() - 18.0;
         p.line_segment(
             [pos2(x, rect.bottom() - 0.5), pos2(end, rect.bottom() - 0.5)],
-            Stroke::new(1.0, alpha(LINE, 0.7)),
+            Stroke::new(1.0, alpha(LINE(), 0.7)),
         );
         if sig == Sig::Working {
             let y = rect.bottom() - 1.0;
@@ -1235,7 +1252,7 @@ impl App {
                     (s.max(x), (s + w).min(end))
                 }
             };
-            p.line_segment([pos2(a, y), pos2(b, y)], Stroke::new(2.0, FLARE));
+            p.line_segment([pos2(a, y), pos2(b, y)], Stroke::new(2.0, FLARE()));
         }
     }
 
@@ -1271,7 +1288,7 @@ impl App {
         }
 
         if !ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
-            p.rect_stroke(screen, 0, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            p.rect_stroke(screen, 0, Stroke::new(1.0, LINE()), StrokeKind::Inside);
         }
         ctx.pointer_hover_pos()
             .is_some_and(|q| below.contains(q) || (beside.width() > 0.0 && beside.contains(q)))
@@ -1410,7 +1427,7 @@ impl eframe::App for App {
 
         let mut acts = Vec::new();
         let over_term = egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(ABYSS))
+            .frame(egui::Frame::new().fill(ABYSS()))
             .show(ctx, |ui| self.body(ui, &mut acts))
             .inner;
 
@@ -1500,7 +1517,7 @@ fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32) {
     let mut picked = None;
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
-        ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, label, mono(12.5), FOAM);
+        ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, label, mono(12.5), FOAM());
         let shown = releases_shown(d);
         let pick_items: Vec<widgets::Pick> = items.iter().map(|(_, p)| widgets::Pick { label: p.label.clone(), detail: p.detail.clone() }).collect();
         picked = widgets::dropdown(ui, Id::new("dlg_releases"), &shown, w - 158.0, &pick_items);
@@ -1516,18 +1533,18 @@ fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32) {
     }
 
     let (text, col) = match &d.choices {
-        Choices::Loading(_) => (tr("reading the releases...", "leggo le release...").to_string(), KELP),
-        Choices::Fail(_, e) => (e.clone(), if d.releases { WRECK } else { DEEP }),
+        Choices::Loading(_) => (tr("reading the releases...", "leggo le release...").to_string(), KELP()),
+        Choices::Fail(_, e) => (e.clone(), if d.releases { WRECK() } else { DEEP() }),
         _ if d.releases => (
             tr(
                 "Only the newest release is kept (latest/) and the newest pre-release (prerelease/). A new one is checked with sha256 before the old one is deleted.",
                 "Si tiene solo l'ultima release (latest/) e l'ultima pre-release (prerelease/). La nuova viene controllata con sha256 prima di cancellare la vecchia.",
             )
             .to_string(),
-            DEEP,
+            DEEP(),
         ),
-        Choices::None => (String::new(), DEEP),
-        _ => (tr("Builds and installers attached to the repo's releases.", "Build e installer allegati alle release del repo.").to_string(), DEEP),
+        Choices::None => (String::new(), DEEP()),
+        _ => (tr("Builds and installers attached to the repo's releases.", "Build e installer allegati alle release del repo.").to_string(), DEEP()),
     };
     if !text.is_empty() {
         ui.label(egui::RichText::new(text).font(mono(11.5)).color(col));

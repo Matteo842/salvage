@@ -64,6 +64,9 @@ pub struct Config {
     /// A Windows scheduled task runs `--sync` while the window is closed.
     #[serde(default)]
     pub scheduled_task: bool,
+    /// Pure black and white look instead of the deep-water palette.
+    #[serde(default)]
+    pub oled: bool,
     pub next_id: u64,
     pub projects: Vec<Project>,
 }
@@ -77,6 +80,7 @@ impl Config {
             check_on_start: true,
             last_sync_all: Some(now_ts()),
             scheduled_task: false,
+            oled: false,
             next_id: 1,
             projects: Vec::new(),
         }

@@ -79,7 +79,7 @@ pub fn icon(p: &Painter, c: Pos2, s: f32, icon: Icon, col: Color32) {
         Icon::Sliders => {
             for (y, knob) in [(-0.6, 0.35), (0.0, -0.4), (0.6, 0.1)] {
                 line((-0.9, y), (0.9, y));
-                p.circle_filled(at(knob, y), 1.9, ABYSS);
+                p.circle_filled(at(knob, y), 1.9, ABYSS());
                 p.circle_stroke(at(knob, y), 1.9, st);
             }
         }
@@ -100,15 +100,15 @@ pub fn icon(p: &Painter, c: Pos2, s: f32, icon: Icon, col: Color32) {
             p.circle_filled(at(0.0, -0.2), s * 0.86, col);
             p.rect_filled(Rect::from_min_max(at(-0.5, 0.35), at(0.5, 1.02)), 1, col);
             for x in [-0.36, 0.36] {
-                p.circle_filled(at(x, -0.12), s * 0.25, GLASS_BASE);
+                p.circle_filled(at(x, -0.12), s * 0.25, GLASS_BASE());
             }
             p.add(Shape::convex_polygon(
                 vec![at(0.0, 0.14), at(-0.13, 0.42), at(0.13, 0.42)],
-                GLASS_BASE,
+                GLASS_BASE(),
                 Stroke::NONE,
             ));
             for x in [-0.18, 0.18] {
-                p.line_segment([at(x, 0.66), at(x, 1.04)], Stroke::new(1.0, GLASS_BASE));
+                p.line_segment([at(x, 0.66), at(x, 1.04)], Stroke::new(1.0, GLASS_BASE()));
             }
         }
     }
@@ -125,28 +125,28 @@ pub enum Tone {
 fn focus_ring(ui: &Ui, resp: &Response, rect: Rect) {
     if resp.has_focus() {
         ui.painter()
-            .rect_stroke(rect.expand(2.0), 3, Stroke::new(1.0, PING), StrokeKind::Outside);
+            .rect_stroke(rect.expand(2.0), 3, Stroke::new(1.0, PING()), StrokeKind::Outside);
     }
 }
 
 pub fn button(ui: &mut Ui, ic: Option<Icon>, label: &str, tone: Tone) -> Response {
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), mono(12.5), FOAM);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), mono(12.5), FOAM());
     let icon_w = if ic.is_some() { 20.0 } else { 0.0 };
     let size = vec2(galley.size().x + icon_w + 26.0, 30.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let hot = ui.ctx().animate_bool_with_time(resp.id.with("hot"), resp.hovered(), 0.1);
     let (accent, base) = match tone {
-        Tone::Primary => (FLARE, 0.12),
-        Tone::Quiet => (KELP, 0.0),
-        Tone::Danger => (WRECK, 0.0),
+        Tone::Primary => (FLARE(), 0.12),
+        Tone::Quiet => (KELP(), 0.0),
+        Tone::Danger => (WRECK(), 0.0),
     };
     let text = match tone {
-        Tone::Primary => mix(FLARE, Color32::WHITE, 0.25 * hot),
-        Tone::Quiet => mix(KELP, FOAM, hot),
-        Tone::Danger => WRECK,
+        Tone::Primary => mix(FLARE(), Color32::WHITE, 0.25 * hot),
+        Tone::Quiet => mix(KELP(), FOAM(), hot),
+        Tone::Danger => WRECK(),
     };
     let border = match tone {
-        Tone::Quiet => mix(LINE, KELP, hot),
+        Tone::Quiet => mix(LINE(), KELP(), hot),
         _ => alpha(accent, 0.55 + 0.45 * hot),
     };
     let p = ui.painter();
@@ -175,13 +175,13 @@ pub fn icon_button_at(ui: &mut Ui, rect: Rect, id: Id, ic: Icon, tip: &str, tint
     if hot > 0.0 {
         p.rect_filled(rect.shrink(1.0), 2, alpha(tint, 0.1 * hot));
     }
-    icon(p, rect.center(), 6.5, ic, mix(KELP, tint, hot));
+    icon(p, rect.center(), 6.5, ic, mix(KELP(), tint, hot));
     focus_ring(ui, &resp, rect);
     resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip)
 }
 
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), mono(12.5), FOAM);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), mono(12.5), FOAM());
     let size = vec2(30.0 + 12.0 + galley.size().x, 24.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.clicked() {
@@ -194,12 +194,12 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     p.rect(
         sw,
         8,
-        mix(alpha(ABYSS, 0.7), alpha(PING, 0.18), t),
-        Stroke::new(1.0, mix(LINE, PING, t)),
+        mix(alpha(ABYSS(), 0.7), alpha(PING(), 0.18), t),
+        Stroke::new(1.0, mix(LINE(), PING(), t)),
         StrokeKind::Inside,
     );
-    p.circle_filled(pos2(sw.left() + 8.0 + 14.0 * t, sw.center().y), 4.5, mix(KELP, PING, t));
-    let col = if resp.hovered() { FOAM } else { mix(KELP, FOAM, 0.4 + 0.6 * t) };
+    p.circle_filled(pos2(sw.left() + 8.0 + 14.0 * t, sw.center().y), 4.5, mix(KELP(), PING(), t));
+    let col = if resp.hovered() { FOAM() } else { mix(KELP(), FOAM(), 0.4 + 0.6 * t) };
     p.galley_with_override_text_color(pos2(sw.right() + 12.0, rect.center().y - galley.size().y / 2.0), galley, col);
     focus_ring(ui, &resp, rect);
     resp.on_hover_cursor(CursorIcon::PointingHand)
@@ -213,19 +213,19 @@ pub fn interval_stepper(ui: &mut Ui, hours: &mut f32) {
         .unwrap_or(INTERVAL_STEPS.len() - 1);
     let (rect, _) = ui.allocate_exact_size(vec2(138.0, 28.0), Sense::hover());
     ui.painter()
-        .rect(rect, 2, alpha(ABYSS, 0.6), Stroke::new(1.0, LINE), StrokeKind::Inside);
+        .rect(rect, 2, alpha(ABYSS(), 0.6), Stroke::new(1.0, LINE()), StrokeKind::Inside);
     let left = Rect::from_min_size(rect.min, vec2(28.0, 28.0));
     let right = Rect::from_min_size(pos2(rect.right() - 28.0, rect.top()), vec2(28.0, 28.0));
-    if icon_button_at(ui, left, Id::new("interval_less"), Icon::Minus, tr("more often", "più spesso"), FOAM).clicked() && at > 0 {
+    if icon_button_at(ui, left, Id::new("interval_less"), Icon::Minus, tr("more often", "più spesso"), FOAM()).clicked() && at > 0 {
         *hours = INTERVAL_STEPS[at - 1];
     }
-    if icon_button_at(ui, right, Id::new("interval_more"), Icon::Plus, tr("less often", "meno spesso"), FOAM).clicked()
+    if icon_button_at(ui, right, Id::new("interval_more"), Icon::Plus, tr("less often", "meno spesso"), FOAM()).clicked()
         && at + 1 < INTERVAL_STEPS.len()
     {
         *hours = INTERVAL_STEPS[at + 1];
     }
     ui.painter()
-        .text(rect.center(), Align2::CENTER_CENTER, hours_label(*hours), mono(12.5), FOAM);
+        .text(rect.center(), Align2::CENTER_CENTER, hours_label(*hours), mono(12.5), FOAM());
 }
 
 /// Single-line text field with our own frame.
@@ -245,13 +245,13 @@ pub fn field(ui: &mut Ui, id: Id, text: &mut String, hint: &str, width: f32) -> 
             .margin(Margin::ZERO)
             .desired_width(inner.width())
             .font(mono(12.5))
-            .text_color(FOAM)
-            .hint_text(RichText::new(hint).color(DEEP)),
+            .text_color(FOAM())
+            .hint_text(RichText::new(hint).color(DEEP())),
     );
-    let stroke = if resp.has_focus() { PING } else { LINE };
+    let stroke = if resp.has_focus() { PING() } else { LINE() };
     ui.painter().set(
         bg,
-        egui::epaint::RectShape::new(rect, 2, alpha(ABYSS, 0.65), Stroke::new(1.0, stroke), StrokeKind::Inside),
+        egui::epaint::RectShape::new(rect, 2, alpha(ABYSS(), 0.65), Stroke::new(1.0, stroke), StrokeKind::Inside),
     );
     resp
 }
@@ -261,11 +261,11 @@ pub fn link(ui: &mut Ui, id: Id, at: Pos2, text: String, size: f32, idle: Color3
     let galley = ui.painter().layout_no_wrap(text, mono(size), idle);
     let rect = Rect::from_min_size(at, galley.size());
     let resp = ui.interact(rect, id, Sense::click());
-    let col = if resp.hovered() { FOAM } else { idle };
+    let col = if resp.hovered() { FOAM() } else { idle };
     ui.painter().galley_with_override_text_color(at, galley, col);
     if resp.hovered() {
         ui.painter()
-            .line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, alpha(FOAM, 0.5)));
+            .line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, alpha(FOAM(), 0.5)));
     }
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
@@ -287,12 +287,12 @@ pub fn dropdown(ui: &mut Ui, id: Id, shown: &str, width: f32, items: &[Pick]) ->
     }
     let hot = resp.hovered() || open;
     let p = ui.painter();
-    p.rect(rect, 2, alpha(ABYSS, 0.65), Stroke::new(1.0, if hot { PING } else { LINE }), StrokeKind::Inside);
-    p.text(pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, shown, mono(12.5), FOAM);
+    p.rect(rect, 2, alpha(ABYSS(), 0.65), Stroke::new(1.0, if hot { PING() } else { LINE() }), StrokeKind::Inside);
+    p.text(pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, shown, mono(12.5), FOAM());
     // Chevron: points down when closed, up when open.
     let c = pos2(rect.right() - 16.0, rect.center().y);
     let dy = if open { -2.5 } else { 2.5 };
-    let col = if hot { FOAM } else { KELP };
+    let col = if hot { FOAM() } else { KELP() };
     p.line_segment([pos2(c.x - 5.0, c.y - dy), pos2(c.x, c.y + dy)], Stroke::new(1.5, col));
     p.line_segment([pos2(c.x, c.y + dy), pos2(c.x + 5.0, c.y - dy)], Stroke::new(1.5, col));
     focus_ring(ui, &resp, rect);
@@ -308,8 +308,8 @@ pub fn dropdown(ui: &mut Ui, id: Id, shown: &str, width: f32, items: &[Pick]) ->
         .fixed_pos(rect.left_bottom() + vec2(0.0, 4.0))
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(HULL)
-                .stroke(Stroke::new(1.0, PING))
+                .fill(HULL())
+                .stroke(Stroke::new(1.0, PING()))
                 .corner_radius(2)
                 .inner_margin(Margin::same(4))
                 .show(ui, |ui| {
@@ -321,17 +321,17 @@ pub fn dropdown(ui: &mut Ui, id: Id, shown: &str, width: f32, items: &[Pick]) ->
                         let (r, row) = ui.allocate_exact_size(vec2(w, h), Sense::click());
                         let p = ui.painter();
                         if row.hovered() {
-                            p.rect_filled(r, 2, alpha(PING, 0.12));
+                            p.rect_filled(r, 2, alpha(PING(), 0.12));
                         }
                         let top = if it.detail.is_empty() { r.center().y } else { r.top() + 14.0 };
-                        p.text(pos2(r.left() + 8.0, top), Align2::LEFT_CENTER, &it.label, mono(12.5), FOAM);
+                        p.text(pos2(r.left() + 8.0, top), Align2::LEFT_CENTER, &it.label, mono(12.5), FOAM());
                         if !it.detail.is_empty() {
                             let mut d: String = it.detail.chars().take(chars).collect();
                             if it.detail.chars().count() > chars {
                                 d.pop();
                                 d.push('\u{2026}');
                             }
-                            p.text(pos2(r.left() + 8.0, r.top() + 31.0), Align2::LEFT_CENTER, d, mono(11.0), KELP);
+                            p.text(pos2(r.left() + 8.0, r.top() + 31.0), Align2::LEFT_CENTER, d, mono(11.0), KELP());
                         }
                         if row.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                             picked = Some(i);

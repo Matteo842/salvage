@@ -98,8 +98,8 @@ impl Term {
                     break;
                 }
                 let mut job = LayoutJob::default();
-                job.append(&line.time, 0.0, fmt(DEEP));
-                job.append(&format!(" {:<10.10} ", line.tag.to_lowercase()), 0.0, fmt(KELP));
+                job.append(&line.time, 0.0, fmt(DEEP()));
+                job.append(&format!(" {:<10.10} ", line.tag.to_lowercase()), 0.0, fmt(KELP()));
                 let shown = if line.transient {
                     usize::MAX
                 } else {
@@ -108,16 +108,16 @@ impl Term {
                 let text: String = line.text.chars().take(shown).collect();
                 match line.kind {
                     LogKind::Cmd => {
-                        job.append("$ ", 0.0, fmt(FLARE));
-                        job.append(&text, 0.0, fmt(FOAM));
+                        job.append("$ ", 0.0, fmt(FLARE()));
+                        job.append(&text, 0.0, fmt(FOAM()));
                     }
-                    LogKind::Out => job.append(&text, 0.0, fmt(mix(KELP, FOAM, 0.25))),
-                    LogKind::Err => job.append(&text, 0.0, fmt(WRECK)),
-                    LogKind::Info => job.append(&text, 0.0, fmt(FOAM)),
-                    LogKind::Good => job.append(&text, 0.0, fmt(PING)),
+                    LogKind::Out => job.append(&text, 0.0, fmt(mix(KELP(), FOAM(), 0.25))),
+                    LogKind::Err => job.append(&text, 0.0, fmt(WRECK())),
+                    LogKind::Info => job.append(&text, 0.0, fmt(FOAM())),
+                    LogKind::Good => job.append(&text, 0.0, fmt(PING())),
                 }
                 if i == 0 && (now * 1.7) as i64 % 2 == 0 {
-                    job.append(" \u{2588}", 0.0, fmt(PING));
+                    job.append(" \u{2588}", 0.0, fmt(PING()));
                 }
                 out.push(Row {
                     y,
@@ -145,7 +145,7 @@ pub fn paint_sharp(p: &Painter, rows: &[Row], x: f32, clip: Rect, opacity: f32, 
         } else {
             1.0
         };
-        p.add(TextShape::new(pos2(x, r.y), r.galley.clone(), FOAM).with_opacity_factor(opacity * k));
+        p.add(TextShape::new(pos2(x, r.y), r.galley.clone(), FOAM()).with_opacity_factor(opacity * k));
     }
 }
 
@@ -178,7 +178,7 @@ pub fn paint_blur(p: &Painter, rows: &[Row], x: f32, clip: Rect, opacity: f32) {
             continue;
         }
         for (dx, dy, w) in TAPS {
-            p.add(TextShape::new(pos2(x + dx, r.y + dy), r.galley.clone(), FOAM).with_opacity_factor(opacity * w));
+            p.add(TextShape::new(pos2(x + dx, r.y + dy), r.galley.clone(), FOAM()).with_opacity_factor(opacity * w));
         }
     }
 }

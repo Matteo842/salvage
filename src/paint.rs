@@ -25,10 +25,10 @@ pub enum Sig {
 impl Sig {
     pub fn color(self) -> Color32 {
         match self {
-            Sig::Live => PING,
-            Sig::Behind | Sig::Working => FLARE,
-            Sig::Lost => WRECK,
-            Sig::Unknown | Sig::Listening => KELP,
+            Sig::Live => PING(),
+            Sig::Behind | Sig::Working => FLARE(),
+            Sig::Lost => WRECK(),
+            Sig::Unknown | Sig::Listening => KELP(),
         }
     }
 }
@@ -66,7 +66,7 @@ pub fn ping(p: &Painter, c: Pos2, sig: Sig, now: f64, seed: u64) {
             p.line_segment([c + vec2(-4.2, 4.2), c + vec2(4.2, -4.2)], Stroke::new(1.3, col));
         }
         Sig::Unknown => {
-            p.circle_stroke(c, 3.5, Stroke::new(1.2, DEEP));
+            p.circle_stroke(c, 3.5, Stroke::new(1.2, DEEP()));
         }
         Sig::Listening => {
             let a = now as f32 * 3.2;
@@ -93,9 +93,9 @@ pub struct Blip {
 pub fn scope(p: &Painter, c: Pos2, r: f32, now: f64, blips: &[Blip], countdown: Option<f32>) {
     for k in 1..=3 {
         let a = if k == 3 { 1.0 } else { 0.55 };
-        p.circle_stroke(c, r * k as f32 / 3.0, Stroke::new(1.0, alpha(LINE, a)));
+        p.circle_stroke(c, r * k as f32 / 3.0, Stroke::new(1.0, alpha(LINE(), a)));
     }
-    let cross = Stroke::new(1.0, alpha(LINE, 0.5));
+    let cross = Stroke::new(1.0, alpha(LINE(), 0.5));
     p.line_segment([c - vec2(r, 0.0), c + vec2(r, 0.0)], cross);
     p.line_segment([c - vec2(0.0, r), c + vec2(0.0, r)], cross);
 
@@ -109,7 +109,7 @@ pub fn scope(p: &Painter, c: Pos2, r: f32, now: f64, blips: &[Blip], countdown: 
         let a0 = sweep - trail * i as f32 / steps as f32;
         let a1 = sweep - trail * (i + 1) as f32 / steps as f32;
         let k = 1.0 - i as f32 / steps as f32;
-        let col = alpha(PING, 0.22 * k * k);
+        let col = alpha(PING(), 0.22 * k * k);
         let base = mesh.vertices.len() as u32;
         mesh.colored_vertex(c, col);
         mesh.colored_vertex(c + r * vec2(a0.cos(), a0.sin()), col);
@@ -117,7 +117,7 @@ pub fn scope(p: &Painter, c: Pos2, r: f32, now: f64, blips: &[Blip], countdown: 
         mesh.add_triangle(base, base + 1, base + 2);
     }
     p.add(Shape::mesh(mesh));
-    p.line_segment([c, c + r * vec2(sweep.cos(), sweep.sin())], Stroke::new(1.2, alpha(PING, 0.85)));
+    p.line_segment([c, c + r * vec2(sweep.cos(), sweep.sin())], Stroke::new(1.2, alpha(PING(), 0.85)));
 
     for b in blips {
         // Golden-angle spacing keeps contacts apart however many there are.
@@ -144,21 +144,21 @@ pub fn scope(p: &Painter, c: Pos2, r: f32, now: f64, blips: &[Blip], countdown: 
         } else {
             (Align2::LEFT_CENTER, vec2(8.0, 0.0))
         };
-        p.text(pos + off, anchor, name, mono(9.5), alpha(mix(KELP, FOAM, lit), 0.35 + 0.65 * lit));
+        p.text(pos + off, anchor, name, mono(9.5), alpha(mix(KELP(), FOAM(), lit), 0.35 + 0.65 * lit));
     }
 
-    p.circle_filled(c, 1.8, PING);
+    p.circle_filled(c, 1.8, PING());
 
     // Outer ring: time until the next automatic run.
     let ring = r + 9.0;
-    p.circle_stroke(c, ring, Stroke::new(1.0, alpha(LINE, 0.6)));
+    p.circle_stroke(c, ring, Stroke::new(1.0, alpha(LINE(), 0.6)));
     if let Some(f) = countdown {
         let f = f.clamp(0.0, 1.0);
         if f > 0.002 {
-            p.add(Shape::line(arc(c, ring, -TAU / 4.0, -TAU / 4.0 + TAU * f), Stroke::new(1.6, FLARE)));
+            p.add(Shape::line(arc(c, ring, -TAU / 4.0, -TAU / 4.0 + TAU * f), Stroke::new(1.6, FLARE())));
         }
         let a = -TAU / 4.0 + TAU * f;
-        p.circle_filled(c + ring * vec2(a.cos(), a.sin()), 2.4, FLARE);
+        p.circle_filled(c + ring * vec2(a.cos(), a.sin()), 2.4, FLARE());
     }
 }
 
@@ -183,7 +183,7 @@ pub fn logo(p: &Painter, at: Pos2, width: f32) -> f32 {
     let mut y = at.y;
     for row in 0..6 {
         let line: String = LETTERS.iter().map(|l| l[row]).collect();
-        let face = mix(FOAM, PING, row as f32 / 5.0);
+        let face = mix(FOAM(), PING(), row as f32 / 5.0);
         let mut job = LayoutJob::default();
         let mut run = String::new();
         let mut run_block = true;
@@ -194,7 +194,7 @@ pub fn logo(p: &Painter, at: Pos2, width: f32) -> f32 {
                     0.0,
                     TextFormat {
                         font_id: font.clone(),
-                        color: if block { face } else { DEEP },
+                        color: if block { face } else { DEEP() },
                         ..Default::default()
                     },
                 );
@@ -211,7 +211,7 @@ pub fn logo(p: &Painter, at: Pos2, width: f32) -> f32 {
         }
         flush(&mut job, &mut run, run_block);
         let galley = p.layout_job(job);
-        p.galley(pos2(at.x, y), galley, FOAM);
+        p.galley(pos2(at.x, y), galley, FOAM());
         y += row_h;
     }
     y
@@ -219,23 +219,23 @@ pub fn logo(p: &Painter, at: Pos2, width: f32) -> f32 {
 
 /// Frosted pane: opaque base, the terminal blurred through it, a tint, a hairline.
 pub fn glass(p: &Painter, rect: Rect, rows: &[Row], term_x: f32) {
-    p.rect_filled(rect, 3, GLASS_BASE);
+    p.rect_filled(rect, 3, GLASS_BASE());
     term::paint_blur(p, rows, term_x, rect.shrink(1.0).intersect(p.clip_rect()), 0.66);
-    p.rect_filled(rect, 3, alpha(HULL, 0.5));
-    p.rect_stroke(rect, 3, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    p.rect_filled(rect, 3, alpha(HULL(), 0.5));
+    p.rect_stroke(rect, 3, Stroke::new(1.0, LINE()), StrokeKind::Inside);
     p.line_segment(
         [pos2(rect.left() + 3.0, rect.top() + 1.5), pos2(rect.right() - 3.0, rect.top() + 1.5)],
-        Stroke::new(1.0, alpha(FOAM, 0.06)),
+        Stroke::new(1.0, alpha(FOAM(), 0.06)),
     );
 }
 
 /// Opaque panel for dialogs: text on it has to read cleanly, so no terminal shows through.
 pub fn solid(p: &Painter, rect: Rect) {
-    p.rect_filled(rect, 3, HULL);
-    p.rect_stroke(rect, 3, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    p.rect_filled(rect, 3, HULL());
+    p.rect_stroke(rect, 3, Stroke::new(1.0, LINE()), StrokeKind::Inside);
     p.line_segment(
         [pos2(rect.left() + 3.0, rect.top() + 1.5), pos2(rect.right() - 3.0, rect.top() + 1.5)],
-        Stroke::new(1.0, alpha(FOAM, 0.06)),
+        Stroke::new(1.0, alpha(FOAM(), 0.06)),
     );
 }
 
