@@ -19,8 +19,9 @@ everything, and you can point the backup at the new link in two clicks.
 - **Syncs on a timer.** Every N hours while the window is open, or through the
   Windows Task Scheduler while it is closed. No service, nothing left running:
   Windows starts Salvage with no window, it syncs, it quits.
-- **Keeps the builds too, if you want them.** Turn on release files, then tick
-  the files you want from the list (for example only the Windows build).
+- **Keeps the builds too, if you want them.** Turn on release files, then pick
+  the systems you want: Windows, Linux, Android, macOS. Salvage tells which
+  file is for which system from its name and extension.
   Salvage keeps the newest release and the newest pre-release. When a new one
   comes out it is downloaded and checked against its sha256 (or its size, when
   the host publishes no hash) before the old one is deleted. Works with GitHub,

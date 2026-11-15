@@ -106,7 +106,7 @@ struct Dialog {
     mirror: bool,
     work: bool,
     releases: bool,
-    files: Vec<String>,
+    platforms: Vec<String>,
     choices: Choices,
     fresh: bool,
     old_urls: Vec<String>,
@@ -133,7 +133,7 @@ impl Dialog {
             mirror: true,
             work: true,
             releases: false,
-            files: Vec::new(),
+            platforms: Vec::new(),
             choices: Choices::None,
             fresh: false,
             old_urls: Vec::new(),
@@ -572,7 +572,7 @@ impl App {
         d.mirror = p.mirror;
         d.work = p.work;
         d.releases = p.releases;
-        d.files = p.files.clone();
+        d.platforms = p.platforms.clone();
         d.old_urls = p.old_urls.clone();
         self.dialog = Some(d);
     }
@@ -603,13 +603,13 @@ impl App {
                     d.error = t!("There is already a repo called {name}: pick another name.", "C'è già un repo chiamato {name}: scegli un altro nome.");
                 } else if !d.mirror && !d.work && !d.releases {
                     d.error = tr("Pick at least one thing to keep.", "Scegli almeno una cosa da tenere.").into();
-                } else if d.releases && d.files.is_empty() {
-                    d.error = tr("Pick at least one release file.", "Scegli almeno un file delle release.").into();
+                } else if d.releases && d.platforms.is_empty() {
+                    d.error = tr("Pick at least one system for the release files.", "Scegli almeno un sistema per i file delle release.").into();
                 } else {
                     let id = self.cfg.add(name, url, d.mirror, d.work);
                     if let Some(p) = self.cfg.projects.iter_mut().find(|p| p.id == id) {
                         p.releases = d.releases;
-                        p.files = d.files.clone();
+                        p.platforms = d.platforms.clone();
                     }
                     self.save();
                     self.queue_sync(id, false);
@@ -627,15 +627,15 @@ impl App {
                     d.error = tr("Pick at least one thing to keep.", "Scegli almeno una cosa da tenere.").into();
                     return false;
                 }
-                if d.releases && d.files.is_empty() {
-                    d.error = tr("Pick at least one release file.", "Scegli almeno un file delle release.").into();
+                if d.releases && d.platforms.is_empty() {
+                    d.error = tr("Pick at least one system for the release files.", "Scegli almeno un sistema per i file delle release.").into();
                     return false;
                 }
                 let Some(p) = self.cfg.projects.iter_mut().find(|p| p.id == id) else {
                     return true;
                 };
                 let moved = url != p.url;
-                let changed = moved || d.fresh || d.mirror != p.mirror || d.work != p.work || d.releases != p.releases || (d.releases && d.files != p.files);
+                let changed = moved || d.fresh || d.mirror != p.mirror || d.work != p.work || d.releases != p.releases || (d.releases && d.platforms != p.platforms);
                 if moved {
                     let old = std::mem::replace(&mut p.url, url.clone());
                     p.old_urls.retain(|u| *u != url && *u != old);
@@ -649,7 +649,7 @@ impl App {
                 p.mirror = d.mirror;
                 p.work = d.work;
                 p.releases = d.releases;
-                p.files = d.files.clone();
+                p.platforms = d.platforms.clone();
                 self.save();
                 if changed {
                     self.queue_sync(id, d.fresh);
@@ -760,7 +760,7 @@ impl App {
                         ui.add_space(2.0);
                         toggle(&mut ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
                         toggle(&mut ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
-                        releases_ui(&mut ui, &mut d, w);
+                        releases_ui(&mut ui, &mut d);
                     }
                     Kind::Edit(_) => {
                         ui.label(egui::RichText::new(&d.name).font(mono(16.0)).color(FOAM));
@@ -783,7 +783,7 @@ impl App {
                         ui.add_space(2.0);
                         toggle(&mut ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
                         toggle(&mut ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
-                        releases_ui(&mut ui, &mut d, w);
+                        releases_ui(&mut ui, &mut d);
                         if d.work {
                             toggle(&mut ui, &mut d.fresh, tr("re-clone the working copy from scratch (the old one stays as .old)", "riscarica la copia di lavoro da zero (la vecchia resta come .old)"));
                         }
@@ -1443,57 +1443,75 @@ impl eframe::App for App {
     }
 }
 
-const PICK_ROWS: usize = 6;
-
 /// Dialog height taken by the release toggle and, when on, its picker.
 fn releases_h(d: &Dialog) -> f32 {
     if !d.releases {
         return 32.0;
     }
-    let list = match &d.choices {
-        Choices::Ready(_, list) => 30.0 * list.len().clamp(1, PICK_ROWS) as f32,
-        _ => 22.0,
-    };
-    32.0 + list + 8.0 + 48.0
+    32.0 + 30.0 * picker_rows(d).len() as f32 + 8.0 + 48.0
 }
 
-/// Release files toggle and, when on, one switch per file the newest release has.
-fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32) {
+/// The platforms the picker shows: the four systems always, `other` only when a
+/// release has a file Salvage cannot place (or it was already chosen).
+fn picker_rows(d: &Dialog) -> Vec<(releases::Platform, Option<Vec<String>>)> {
+    let found = match &d.choices {
+        Choices::Ready(_, list) => Some(list),
+        _ => None,
+    };
+    releases::Platform::ALL
+        .iter()
+        .map(|&pl| (pl, found.map(|l| l.iter().find(|c| c.platform == pl).map(|c| c.files.clone()).unwrap_or_default())))
+        .filter(|(pl, files)| {
+            *pl != releases::Platform::Other || d.platforms.iter().any(|k| k == pl.key()) || files.as_ref().is_some_and(|f| !f.is_empty())
+        })
+        .collect()
+}
+
+/// Release files toggle and, when on, one switch per system with the files it brings.
+fn releases_ui(ui: &mut Ui, d: &mut Dialog) {
     toggle(ui, &mut d.releases, tr("release files: builds and installers", "file delle release: build e installer"));
     if !d.releases {
         return;
     }
+    let status = match &d.choices {
+        Choices::None => Some((tr("paste the link to see the files", "incolla il link per vedere i file").to_string(), KELP)),
+        Choices::Loading(_) => Some((tr("reading the releases...", "leggo le release...").to_string(), KELP)),
+        Choices::Fail(_, e) => Some((e.clone(), WRECK)),
+        Choices::Ready(..) => None,
+    };
+    for (pl, files) in picker_rows(d) {
+        let mut on = d.platforms.iter().any(|k| k == pl.key());
+        let detail = match &files {
+            Some(f) if f.is_empty() => tr("no files in the latest release", "nessun file nell'ultima release").to_string(),
+            Some(f) => f.join(", "),
+            None => String::new(),
+        };
+        let label = fit(&format!("{:<8}  {detail}", pl.label()), 62);
+        let r = ui.scope(|ui| {
+            let dim = files.as_ref().is_some_and(|f| f.is_empty());
+            if dim {
+                ui.set_opacity(0.55);
+            }
+            toggle(ui, &mut on, &label)
+        });
+        if r.inner.changed() {
+            d.platforms.retain(|k| k != pl.key());
+            if on {
+                d.platforms.push(pl.key().to_string());
+            }
+        }
+        if let Some(f) = files.filter(|f| f.len() > 1) {
+            r.inner.on_hover_text(f.join("\n"));
+        }
+    }
     let note = |ui: &mut Ui, text: &str, col: Color32| {
         ui.label(egui::RichText::new(text).font(mono(11.5)).color(col));
     };
-    match &d.choices {
-        Choices::None => note(ui, tr("paste the link to see the files", "incolla il link per vedere i file"), KELP),
-        Choices::Loading(_) => note(ui, tr("reading the releases...", "leggo le release..."), KELP),
-        Choices::Fail(_, e) => note(ui, &fit(e, 72), WRECK),
-        Choices::Ready(_, list) => {
-            let rows = list.len().min(PICK_ROWS);
-            egui::ScrollArea::vertical()
-                .id_salt("release_files")
-                .max_height(30.0 * rows as f32)
-                .min_scrolled_height(30.0 * rows as f32)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.set_width(w - 12.0);
-                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                    for c in list {
-                        let mut on = d.files.contains(&c.key);
-                        let label = if c.pre_only { format!("{}  (pre-release)", c.name) } else { c.name.clone() };
-                        if toggle(ui, &mut on, &label).changed() {
-                            d.files.retain(|k| *k != c.key);
-                            if on {
-                                d.files.push(c.key.clone());
-                            }
-                        }
-                    }
-                });
-        }
+    if let Some((text, col)) = status {
+        note(ui, &fit(&text, 72), col);
+    } else {
+        ui.add_space(4.0);
     }
-    ui.add_space(4.0);
     note(
         ui,
         tr(

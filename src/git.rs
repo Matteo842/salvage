@@ -279,29 +279,37 @@ fn run_tool(
         move || {
             let mut last_err = String::new();
             let mut last_line = String::new();
-            read_segments(err, |line| {
-                // curl's progress bar opens with a `#=#=#` / `##O#-#` animation.
-                if line.chars().all(|c| matches!(c, '#' | '=' | 'O' | '-' | ' ')) {
-                    return;
-                }
-                if let Some((phase, pct)) = parse_progress(&line) {
-                    if let Some(id) = id {
-                        bus.send(Event::Progress { id, phase, pct });
+            read_segments(err, |seg| {
+                // curl writes its error right after the bar, with no line break:
+                // `65.4%curl: (56) Recv failure`. Split it off or it reads as progress.
+                let pieces = match seg.find("curl: (") {
+                    Some(i) if i > 0 => vec![seg[..i].to_string(), seg[i..].to_string()],
+                    _ => vec![seg],
+                };
+                for line in pieces {
+                    // curl's progress bar opens with a `#=#=#` / `##O#-#` animation.
+                    if line.chars().all(|c| matches!(c, '#' | '=' | 'O' | '-' | ' ')) {
+                        continue;
                     }
-                    bus.send(Event::Log {
-                        tag: tag.clone(),
-                        kind: LogKind::Out,
-                        text: line,
-                        transient: true,
-                    });
-                    return;
+                    if let Some((phase, pct)) = parse_progress(&line) {
+                        if let Some(id) = id {
+                            bus.send(Event::Progress { id, phase, pct });
+                        }
+                        bus.send(Event::Log {
+                            tag: tag.clone(),
+                            kind: LogKind::Out,
+                            text: line,
+                            transient: true,
+                        });
+                        continue;
+                    }
+                    let bad = is_error_line(&line);
+                    if bad {
+                        last_err = line.clone();
+                    }
+                    last_line = line.clone();
+                    bus.log(&tag, if bad { LogKind::Err } else { LogKind::Out }, line);
                 }
-                let bad = is_error_line(&line);
-                if bad {
-                    last_err = line.clone();
-                }
-                last_line = line.clone();
-                bus.log(&tag, if bad { LogKind::Err } else { LogKind::Out }, line);
             });
             if last_err.is_empty() {
                 last_line

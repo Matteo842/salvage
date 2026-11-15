@@ -19,6 +19,9 @@ use crate::git::{curl, stopped_msg, Bus, Event, LogKind};
 use crate::lang::tr;
 use crate::model::{sanitize_name, Project};
 
+/// Tries per file before giving up until the next sync.
+const DOWNLOAD_TRIES: u32 = 5;
+
 struct Asset {
     name: String,
     url: String,
@@ -33,16 +36,82 @@ struct Release {
     assets: Vec<Asset>,
 }
 
-/// One line of the file picker in the add/edit dialogs.
+/// What a release file is built for, guessed from its name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Platform {
+    Windows,
+    Linux,
+    Android,
+    MacOs,
+    /// Nothing in the name says which system it is for.
+    Other,
+}
+
+impl Platform {
+    pub const ALL: [Platform; 5] = [Platform::Windows, Platform::Linux, Platform::Android, Platform::MacOs, Platform::Other];
+
+    /// Saved in the project's list of chosen platforms.
+    pub fn key(self) -> &'static str {
+        match self {
+            Platform::Windows => "windows",
+            Platform::Linux => "linux",
+            Platform::Android => "android",
+            Platform::MacOs => "macos",
+            Platform::Other => "other",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Platform::Windows => "Windows",
+            Platform::Linux => "Linux",
+            Platform::Android => "Android",
+            Platform::MacOs => "macOS",
+            Platform::Other => tr("other", "altro"),
+        }
+    }
+}
+
+/// Which system a release file is for, from the words in its name and its
+/// extension. `None` for checksums and signatures: they are only used to check
+/// the other files, never offered.
+pub fn platform(name: &str) -> Option<Platform> {
+    let n = name.to_lowercase();
+    let ext = n.rsplit_once('.').map_or("", |(_, e)| e);
+    if matches!(ext, "sha256" | "sha256sum" | "sha512" | "sha512sum" | "sha1" | "md5" | "sig" | "asc" | "minisig" | "pem" | "sbom")
+        || n.contains("sha256sums")
+        || n.contains("sha512sums")
+        || n.contains("checksums")
+    {
+        return None;
+    }
+    let words: Vec<&str> = n.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let has = |list: &[&str]| words.iter().any(|w| list.contains(w));
+    // Android before Linux: `aarch64-linux-android` is an Android build.
+    let found = if has(&["android", "apk"]) {
+        Platform::Android
+    } else if has(&["macos", "mac", "osx", "darwin", "apple", "dmg"]) {
+        Platform::MacOs
+    } else if has(&["windows", "win", "win32", "win64", "msvc", "mingw", "mingw32", "mingw64", "exe", "msi", "msix", "appx", "msixbundle", "appxbundle"]) {
+        Platform::Windows
+    } else if has(&["linux", "appimage", "deb", "rpm", "flatpak", "snap", "musl", "ubuntu", "debian", "fedora"]) {
+        Platform::Linux
+    } else if ext == "aab" {
+        Platform::Android
+    } else if ext == "pkg" {
+        Platform::MacOs
+    } else {
+        Platform::Other
+    };
+    Some(found)
+}
+
+/// One line of the picker in the add/edit dialogs: a platform and the files
+/// the newest releases have for it.
 #[derive(Clone)]
 pub struct Choice {
-    /// What is saved in the project: the file name with the version taken out,
-    /// so the choice still holds when the next release comes out.
-    pub key: String,
-    /// The file name as it is in the newest release that has it.
-    pub name: String,
-    /// Only the pre-release has this file.
-    pub pre_only: bool,
+    pub platform: Platform,
+    pub files: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -208,17 +277,24 @@ fn pick(releases: &[Release]) -> (Option<&Release>, Option<&Release>) {
 pub fn list_files(bus: &Bus, url: &str) {
     let result = fetch(bus, tr("releases", "release"), url).and_then(|releases| {
         let (stable, pre) = pick(&releases);
-        let mut out: Vec<Choice> = Vec::new();
-        for (rel, pre_only) in [(stable, false), (pre, true)] {
-            for a in rel.into_iter().flat_map(|r| r.assets.iter().map(move |a| (r, a))) {
-                let (r, a) = a;
+        let mut out: Vec<Choice> = Platform::ALL.iter().map(|&platform| Choice { platform, files: Vec::new() }).collect();
+        let mut seen: Vec<String> = Vec::new();
+        for r in [stable, pre].into_iter().flatten() {
+            for a in &r.assets {
+                let Some(pl) = platform(&a.name) else {
+                    continue;
+                };
+                // The pre-release often has the same files under a newer version.
                 let key = file_key(&r.tag, &a.name);
-                if !out.iter().any(|c| c.key == key) {
-                    out.push(Choice { key, name: a.name.clone(), pre_only });
+                if !seen.contains(&key) {
+                    seen.push(key);
+                    if let Some(c) = out.iter_mut().find(|c| c.platform == pl) {
+                        c.files.push(a.name.clone());
+                    }
                 }
             }
         }
-        if out.is_empty() {
+        if seen.is_empty() {
             Err(tr("this repo has no release with files attached", "questo repo non ha release con file allegati").into())
         } else {
             Ok(out)
@@ -288,10 +364,44 @@ fn download(bus: &Bus, p: &Project, rel: &Release, a: &Asset, dir: &Path, sums: 
     let part = dir.join(format!("{}.part", sanitize_name(&a.name)));
     let target = part.to_string_lossy().to_string();
     bus.log(tag, LogKind::Info, format!("{} / {}", rel.tag, a.name));
-    let done = curl(bus, tag, Some(p.id), &["-fL", "-#", "--retry", "2", "-A", "Salvage", "-o", &target, &a.url], None);
-    if !done.ok {
-        let _ = std::fs::remove_file(&part);
-        return Err(format!("{}: {}", a.name, humanize(&done.err)));
+    // Big files over a long transfer often lose the connection halfway
+    // (`curl: (56) Recv failure: Connection was reset`). Resume from what is
+    // already in the `.part` instead of starting over; the sha256 check below
+    // proves the pieces add up. The `.part` also survives to the next sync.
+    let part_len = || std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let have = part_len();
+        if have > 0 && a.size == Some(have) {
+            break;
+        }
+        let mut args = vec!["-fL", "-#", "--retry", "2", "--speed-limit", "1024", "--speed-time", "60", "-A", "Salvage"];
+        if have > 0 {
+            args.extend(["-C", "-"]);
+        }
+        args.extend(["-o", target.as_str(), a.url.as_str()]);
+        let done = curl(bus, tag, Some(p.id), &args, None);
+        if done.ok {
+            break;
+        }
+        if bus.cancel.load(Ordering::Relaxed) {
+            return Err(stopped_msg().into());
+        }
+        if attempt >= DOWNLOAD_TRIES {
+            return Err(format!("{}: {}", a.name, humanize(&done.err)));
+        }
+        let mib = part_len() as f64 / (1024.0 * 1024.0);
+        bus.log(
+            tag,
+            LogKind::Info,
+            t!(
+                "connection dropped at {mib:.1} MiB, resuming (attempt {}/{DOWNLOAD_TRIES})",
+                "connessione caduta a {mib:.1} MiB, riprendo (tentativo {}/{DOWNLOAD_TRIES})",
+                attempt + 1
+            ),
+        );
+        std::thread::sleep(Duration::from_secs(2));
     }
 
     let expected = a.sha256.clone().or_else(|| sums.get_or_insert_with(|| load_sums(bus, tag, rel)).get(&a.name).cloned());
@@ -335,7 +445,11 @@ fn remove_all(bus: &Bus, tag: &str, dir: &Path) {
 /// Bring one slot (`latest` or `prerelease`) to the chosen files of `rel`.
 fn sync_slot(bus: &Bus, p: &Project, slot: &Path, rel: &Release) -> Result<(), String> {
     let tag = p.name.as_str();
-    let wanted: Vec<&Asset> = rel.assets.iter().filter(|a| p.files.contains(&file_key(&rel.tag, &a.name))).collect();
+    let wanted: Vec<&Asset> = rel
+        .assets
+        .iter()
+        .filter(|a| platform(&a.name).is_some_and(|pl| p.platforms.iter().any(|k| k == pl.key())))
+        .collect();
     if wanted.is_empty() {
         bus.log(tag, LogKind::Info, t!("{}: none of the chosen files is in this release", "{}: nessuno dei file scelti è in questa release", rel.tag));
         return Ok(());
@@ -356,7 +470,8 @@ fn sync_slot(bus: &Bus, p: &Project, slot: &Path, rel: &Release) -> Result<(), S
                 first_err.get_or_insert(e);
             }
         }
-        let keep: Vec<String> = wanted.iter().map(|a| sanitize_name(&a.name)).collect();
+        // A `.part` of a chosen file is a download to resume, not a leftover.
+        let keep: Vec<String> = wanted.iter().flat_map(|a| [sanitize_name(&a.name), format!("{}.part", sanitize_name(&a.name))]).collect();
         for f in std::fs::read_dir(&current).into_iter().flatten().flatten() {
             let name = f.file_name().to_string_lossy().to_string();
             if f.path().is_file() && !keep.contains(&name) && std::fs::remove_file(f.path()).is_ok() {
@@ -370,13 +485,17 @@ fn sync_slot(bus: &Bus, p: &Project, slot: &Path, rel: &Release) -> Result<(), S
         // New release: everything goes into a side folder first. The old
         // release is deleted only once every new file has passed its check.
         bus.log(tag, LogKind::Info, t!("new release {}", "nuova release {}", rel.tag));
+        // A folder left by an interrupted sync is reused: its finished files
+        // already passed the check, its `.part` files resume.
         let incoming = slot.join(format!(".incoming-{}", sanitize_name(&rel.tag)));
-        let _ = std::fs::remove_dir_all(&incoming);
         std::fs::create_dir_all(&incoming).map_err(|e| t!("cannot create {}: {e}", "non riesco a creare {}: {e}", incoming.display()))?;
         for a in &wanted {
+            let len = std::fs::metadata(incoming.join(sanitize_name(&a.name))).ok().map(|m| m.len());
+            if len.is_some() && (a.size.is_none() || len == a.size) {
+                continue;
+            }
             if let Err(e) = download(bus, p, rel, a, &incoming, &mut sums) {
-                let _ = std::fs::remove_dir_all(&incoming);
-                bus.log(tag, LogKind::Err, t!("{e}; the old release stays", "{e}; la release vecchia resta"));
+                bus.log(tag, LogKind::Err, t!("{e}; the old release stays, the next sync picks up from here", "{e}; la release vecchia resta, la prossima sincronizzazione riprende da qui"));
                 return Err(e);
             }
         }
@@ -449,6 +568,34 @@ mod tests {
         assert_eq!(file_key("release-2.6", "CrashBandicoot-2.6.apk"), "CrashBandicoot-{v}.apk");
         assert_eq!(file_key("v2", "app-win32.exe"), "app-win32.exe");
         assert_eq!(file_key("v1.0", "CrashBandicoot.exe"), "CrashBandicoot.exe");
+    }
+
+    #[test]
+    fn platforms() {
+        use Platform::*;
+        let cases = [
+            ("CrashBandicoot-2.6.apk", Some(Android)),
+            ("CrashBandicoot-arm64.exe", Some(Windows)),
+            ("CrashBandicoot-Linux", Some(Linux)),
+            ("CrashBandicoot-Linux-arm64", Some(Linux)),
+            ("CrashBandicoot.exe", Some(Windows)),
+            ("Hookshot-v2.3.1-Windows-x64.zip", Some(Windows)),
+            ("Hookshot-v2.3.1-x86_64.AppImage", Some(Linux)),
+            ("Hookshot-x86_64.AppImage.zsync", Some(Linux)),
+            ("HookshotBuilder.exe.sha256", None),
+            ("SHA256SUMS", None),
+            ("ripgrep-14.1.0-x86_64-pc-windows-msvc.zip", Some(Windows)),
+            ("ripgrep-14.1.0-aarch64-apple-darwin.tar.gz", Some(MacOs)),
+            ("ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz", Some(Linux)),
+            ("ripgrep_14.1.0-1_amd64.deb", Some(Linux)),
+            ("app-aarch64-linux-android.tar.gz", Some(Android)),
+            ("App-1.0.dmg", Some(MacOs)),
+            ("App-1.0-universal.pkg", Some(MacOs)),
+            ("assets.zip", Some(Other)),
+        ];
+        for (name, want) in cases {
+            assert_eq!(platform(name), want, "{name}");
+        }
     }
 
     #[test]

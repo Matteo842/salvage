@@ -32,10 +32,10 @@ pub struct Project {
     /// Download the files attached to the repo's releases (builds, installers).
     #[serde(default)]
     pub releases: bool,
-    /// Release files to keep, by name with the version taken out
-    /// (see [`crate::releases::file_key`]).
+    /// Systems whose release files to keep: `windows`, `linux`, `android`,
+    /// `macos`, `other` (see [`crate::releases::platform`]).
     #[serde(default)]
-    pub files: Vec<String>,
+    pub platforms: Vec<String>,
 }
 
 impl Project {
@@ -114,7 +114,7 @@ impl Config {
             last_error: None,
             old_urls: Vec::new(),
             releases: false,
-            files: Vec::new(),
+            platforms: Vec::new(),
         });
         id
     }
