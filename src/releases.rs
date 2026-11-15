@@ -19,6 +19,9 @@ use crate::git::{curl, stopped_msg, Bus, Event, LogKind};
 use crate::lang::tr;
 use crate::model::{sanitize_name, Project};
 
+/// Saved in a project's platforms: every file, whatever system it is for.
+pub const ALL: &str = "all";
+
 /// Tries per file before giving up until the next sync.
 const DOWNLOAD_TRIES: u32 = 5;
 
@@ -448,7 +451,7 @@ fn sync_slot(bus: &Bus, p: &Project, slot: &Path, rel: &Release) -> Result<(), S
     let wanted: Vec<&Asset> = rel
         .assets
         .iter()
-        .filter(|a| platform(&a.name).is_some_and(|pl| p.platforms.iter().any(|k| k == pl.key())))
+        .filter(|a| platform(&a.name).is_some_and(|pl| p.platforms.iter().any(|k| k == ALL || k == pl.key())))
         .collect();
     if wanted.is_empty() {
         bus.log(tag, LogKind::Info, t!("{}: none of the chosen files is in this release", "{}: nessuno dei file scelti è in questa release", rel.tag));

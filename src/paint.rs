@@ -229,6 +229,16 @@ pub fn glass(p: &Painter, rect: Rect, rows: &[Row], term_x: f32) {
     );
 }
 
+/// Opaque panel for dialogs: text on it has to read cleanly, so no terminal shows through.
+pub fn solid(p: &Painter, rect: Rect) {
+    p.rect_filled(rect, 3, HULL);
+    p.rect_stroke(rect, 3, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    p.line_segment(
+        [pos2(rect.left() + 3.0, rect.top() + 1.5), pos2(rect.right() - 3.0, rect.top() + 1.5)],
+        Stroke::new(1.0, alpha(FOAM, 0.06)),
+    );
+}
+
 /// Window / taskbar icon. The same pixels are baked into the .exe by build.rs.
 pub fn app_icon() -> egui::IconData {
     egui::IconData {

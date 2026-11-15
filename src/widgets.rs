@@ -269,3 +269,81 @@ pub fn link(ui: &mut Ui, id: Id, at: Pos2, text: String, size: f32, idle: Color3
     }
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
+
+/// One entry of a [`dropdown`]: what it says, and a dimmer line under it.
+pub struct Pick {
+    pub label: String,
+    pub detail: String,
+}
+
+/// Field-shaped button that opens a list of [`Pick`]s below it.
+/// Returns the index of the entry clicked, if any.
+pub fn dropdown(ui: &mut Ui, id: Id, shown: &str, width: f32, items: &[Pick]) -> Option<usize> {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
+    let mut open = ui.memory(|m| m.is_popup_open(id));
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(id));
+        open = !open;
+    }
+    let hot = resp.hovered() || open;
+    let p = ui.painter();
+    p.rect(rect, 2, alpha(ABYSS, 0.65), Stroke::new(1.0, if hot { PING } else { LINE }), StrokeKind::Inside);
+    p.text(pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, shown, mono(12.5), FOAM);
+    // Chevron: points down when closed, up when open.
+    let c = pos2(rect.right() - 16.0, rect.center().y);
+    let dy = if open { -2.5 } else { 2.5 };
+    let col = if hot { FOAM } else { KELP };
+    p.line_segment([pos2(c.x - 5.0, c.y - dy), pos2(c.x, c.y + dy)], Stroke::new(1.5, col));
+    p.line_segment([pos2(c.x, c.y + dy), pos2(c.x + 5.0, c.y - dy)], Stroke::new(1.5, col));
+    focus_ring(ui, &resp, rect);
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    if !open {
+        return None;
+    }
+
+    // Tooltip order keeps the list above the dialog it belongs to.
+    let mut picked = None;
+    let area = egui::Area::new(id.with("list"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(rect.left_bottom() + vec2(0.0, 4.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(HULL)
+                .stroke(Stroke::new(1.0, PING))
+                .corner_radius(2)
+                .inner_margin(Margin::same(4))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                    let w = width - 10.0;
+                    let chars = (w / 7.2) as usize;
+                    for (i, it) in items.iter().enumerate() {
+                        let h = if it.detail.is_empty() { 28.0 } else { 44.0 };
+                        let (r, row) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+                        let p = ui.painter();
+                        if row.hovered() {
+                            p.rect_filled(r, 2, alpha(PING, 0.12));
+                        }
+                        let top = if it.detail.is_empty() { r.center().y } else { r.top() + 14.0 };
+                        p.text(pos2(r.left() + 8.0, top), Align2::LEFT_CENTER, &it.label, mono(12.5), FOAM);
+                        if !it.detail.is_empty() {
+                            let mut d: String = it.detail.chars().take(chars).collect();
+                            if it.detail.chars().count() > chars {
+                                d.pop();
+                                d.push('\u{2026}');
+                            }
+                            p.text(pos2(r.left() + 8.0, r.top() + 31.0), Align2::LEFT_CENTER, d, mono(11.0), KELP);
+                        }
+                        if row.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            picked = Some(i);
+                        }
+                    }
+                });
+        });
+    let outside = ui.input(|i| i.pointer.any_click())
+        && !resp.clicked()
+        && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|q| area.response.rect.contains(q));
+    if picked.is_some() || outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.memory_mut(|m| m.close_popup());
+    }
+    picked
+}

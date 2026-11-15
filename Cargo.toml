@@ -1,6 +1,6 @@
 [package]
 name = "salvage"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Keeps mirrors and working copies of git repos that might vanish up to date"
 license = "MIT"
