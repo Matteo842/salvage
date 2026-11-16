@@ -5,7 +5,9 @@
 //! default, see [`Project::keep`]): the newest in `<dir>/<tag>/`, the older ones
 //! in `<dir>/OLD/<tag>/`, and the newest pre-release when it is newer than
 //! those in `<dir>/prerelease/<tag>/`. `<dir>` is `Name-releases` under the
-//! backup folder, or a folder picked for the repo.
+//! backup folder, or a folder picked for the repo. With [`Project::flat`] the
+//! newest release's files sit loose in `<dir>` itself, so their path never
+//! changes; Salvage remembers which files those are (see [`Loose`]).
 //! A new release is downloaded and checked (sha256 when the host publishes it,
 //! size otherwise) before an old one is deleted.
 //!
@@ -513,7 +515,25 @@ fn owned_path() -> PathBuf {
     crate::model::config_path().with_file_name("releases.json")
 }
 
-/// Releases sync in parallel: one at a time reads and rewrites [`owned_path`].
+/// One file for every repo, kept with the config: for each releases folder,
+/// the release whose files sit loose in it (see [`Project::flat`]).
+fn loose_path() -> PathBuf {
+    crate::model::config_path().with_file_name("release-loose.json")
+}
+
+/// The release whose files Salvage put loose in a releases folder.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct Loose {
+    tag: String,
+    files: Vec<String>,
+}
+
+fn read_loose(path: &Path) -> HashMap<String, Loose> {
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// Releases sync in parallel: one at a time reads and rewrites [`owned_path`]
+/// and [`loose_path`].
 static OWNED_LOCK: Mutex<()> = Mutex::new(());
 
 fn read_owned(path: &Path) -> HashMap<String, Vec<String>> {
@@ -530,16 +550,18 @@ struct Owned {
     /// `Name-releases` under the backup folder is Salvage's as a whole.
     all: bool,
     list: Vec<String>,
+    /// The release loose in `dir`, if any.
+    loose: Option<Loose>,
 }
 
 impl Owned {
     fn load(bus: &Bus, tag: &str, dir: &Path, all: bool) -> Self {
         let id = dir.to_string_lossy().replace('\\', "/");
-        let list = {
+        let (list, loose) = {
             let _guard = OWNED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            read_owned(&owned_path()).remove(&id).unwrap_or_default()
+            (read_owned(&owned_path()).remove(&id).unwrap_or_default(), read_loose(&loose_path()).remove(&id))
         };
-        let mut owned = Self { dir: dir.to_path_buf(), id, all, list };
+        let mut owned = Self { dir: dir.to_path_buf(), id, all, list, loose };
         // The list of an older Salvage, in the folder itself: it joins the
         // central one, then goes once that is written.
         let old = dir.join(OLD_OWNED_FILE);
@@ -607,11 +629,167 @@ impl Owned {
             std::fs::create_dir_all(parent).map_err(fail)?;
         }
         let text = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
-        // Through a temp file, so a crash mid-write cannot lose the list.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).map_err(fail)?;
-        std::fs::rename(&tmp, &path).map_err(fail)
+        write_json(&path, &text).map_err(fail)?;
+
+        let path = loose_path();
+        let mut all = read_loose(&path);
+        if all.get(&self.id) == self.loose.as_ref() {
+            return Ok(());
+        }
+        match &self.loose {
+            Some(l) => all.insert(self.id.clone(), l.clone()),
+            None => all.remove(&self.id),
+        };
+        let text = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
+        write_json(&path, &text).map_err(|e| t!("cannot write {}: {e}", "non riesco a scrivere {}: {e}", path.display()))
     }
+}
+
+/// Through a temp file, so a crash mid-write cannot lose the list.
+fn write_json(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn clash(path: &Path) -> String {
+    t!(
+        "{} is already there and was not made by Salvage: rename it, or pick another folder",
+        "{} c'è già e non l'ha creato Salvage: rinominalo, o scegli un'altra cartella",
+        path.display()
+    )
+}
+
+/// Move the files `names` from folder `from` into folder `to`, replacing
+/// files of the same name. Returns the names done (moved, or already gone)
+/// and the error that stopped it, if one did.
+fn move_files(names: &[String], from: &Path, to: &Path) -> (Vec<String>, Option<String>) {
+    let mut done = Vec::new();
+    for n in names {
+        let src = from.join(n);
+        if src.exists() {
+            if let Err(e) = std::fs::rename(&src, to.join(n)) {
+                return (done, Some(t!("cannot move {}: {e}", "non riesco a spostare {}: {e}", src.display())));
+            }
+        }
+        done.push(n.clone());
+    }
+    (done, None)
+}
+
+/// Move the release loose in the releases folder into `into`, keeping track
+/// of what is still loose if a file cannot move.
+fn unloose(bus: &Bus, tag: &str, dir: &Path, into: &Path, owned: &mut Owned) -> Result<(), String> {
+    let Some(loose) = owned.loose.clone() else {
+        return Ok(());
+    };
+    if into.exists() && !owned.has(into) {
+        let e = clash(into);
+        bus.log(tag, LogKind::Err, e.clone());
+        return Err(e);
+    }
+    std::fs::create_dir_all(into).map_err(|e| t!("cannot create {}: {e}", "non riesco a creare {}: {e}", into.display()))?;
+    owned.add(into);
+    let (done, err) = move_files(&loose.files, dir, into);
+    let left: Vec<String> = loose.files.into_iter().filter(|f| !done.contains(f)).collect();
+    owned.loose = (!left.is_empty()).then(|| Loose { tag: loose.tag.clone(), files: left });
+    if let Some(e) = err {
+        bus.log(tag, LogKind::Err, e.clone());
+        return Err(e);
+    }
+    bus.log(tag, LogKind::Info, t!("moved {} to {}", "spostata {} in {}", loose.tag, into.display()));
+    Ok(())
+}
+
+/// Keep the files of `rel`, the newest stable release, loose in `dir`. A new
+/// release is completed in `dir/<tag>/` first (checked like any other); only
+/// then does the release loose until now move to `old/<tag>/`, and the new
+/// files take its place.
+fn sync_flat(bus: &Bus, p: &Project, dir: &Path, old: &Path, rel: &Release, owned: &mut Owned) -> Result<Option<PathBuf>, String> {
+    let tag = p.name.as_str();
+    let wanted = wanted(p, rel);
+    if wanted.is_empty() {
+        bus.log(tag, LogKind::Info, t!("{}: none of the chosen files is in this release", "{}: nessuno dei file scelti è in questa release", rel.tag));
+        return Ok(None);
+    }
+    let folder_name = sanitize_name(&rel.tag);
+    // A file in the folder that Salvage did not put there.
+    let taken = |owned: &Owned, name: &str| dir.join(name).exists() && !owned.loose.as_ref().is_some_and(|l| l.files.iter().any(|f| f == name));
+
+    if owned.loose.as_ref().is_some_and(|l| l.tag == rel.tag) && !dir.join(&folder_name).is_dir() {
+        // Same release: fetch what is missing, drop what is no longer chosen.
+        let mut sums = None;
+        let mut first_err = None;
+        let names: Vec<String> = wanted.iter().map(|a| sanitize_name(&a.name)).collect();
+        for (a, name) in wanted.iter().zip(&names) {
+            let len = std::fs::metadata(dir.join(name)).ok().map(|m| m.len());
+            if !taken(owned, name) && len.is_some() && (a.size.is_none() || len == a.size) {
+                continue;
+            }
+            let result = if taken(owned, name) { Err(clash(&dir.join(name))) } else { download(bus, p, rel, a, dir, &mut sums) };
+            match result {
+                Ok(()) => {
+                    if let Some(l) = owned.loose.as_mut().filter(|l| !l.files.contains(name)) {
+                        l.files.push(name.clone());
+                    }
+                }
+                Err(e) => {
+                    bus.log(tag, LogKind::Err, e.clone());
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(l) = owned.loose.as_mut() {
+            l.files.retain(|f| {
+                if names.contains(f) {
+                    return true;
+                }
+                if std::fs::remove_file(dir.join(f)).is_ok() {
+                    bus.log(tag, LogKind::Info, t!("removed {f}: no longer chosen", "rimosso {f}: non più scelto"));
+                }
+                false
+            });
+        }
+        return first_err.map_or(Ok(Some(dir.to_path_buf())), Err);
+    }
+
+    // A new release, or one already on disk in a folder of its own (the
+    // newest from before the repo kept it loose, or an old one back on top).
+    place(bus, tag, &folder_name, dir, &[old, &dir.join(LEGACY)], owned);
+    let Some(folder) = sync_release(bus, p, dir, rel, owned)? else {
+        return Ok(None);
+    };
+    let files: Vec<String> = std::fs::read_dir(&folder)
+        .map_err(|e| format!("{}: {e}", folder.display()))?
+        .flatten()
+        .filter(|f| f.path().is_file())
+        .map(|f| f.file_name().to_string_lossy().to_string())
+        .collect();
+    // Nothing moves unless every new file can take its place.
+    if let Some(f) = files.iter().find(|f| taken(owned, f)) {
+        let e = clash(&dir.join(f));
+        bus.log(tag, LogKind::Err, e.clone());
+        return Err(e);
+    }
+    // The release loose until now goes to OLD/<tag>/; the rest of the sync
+    // keeps it there or deletes it, as for any old release. A half-moved
+    // copy of this same release is simply replaced.
+    if let Some(prev) = owned.loose.as_ref().filter(|l| l.tag != rel.tag).map(|l| sanitize_name(&l.tag)) {
+        unloose(bus, tag, dir, &old.join(prev), owned)?;
+    }
+    let (done, err) = move_files(&files, &folder, dir);
+    let mut now = owned.loose.take().map(|l| l.files).unwrap_or_default();
+    now.extend(done.into_iter().filter(|f| !now.contains(f)).collect::<Vec<_>>());
+    owned.loose = (!now.is_empty()).then(|| Loose { tag: rel.tag.clone(), files: now });
+    if let Some(e) = err {
+        bus.log(tag, LogKind::Err, e.clone());
+        return Err(e);
+    }
+    if std::fs::remove_dir(&folder).is_ok() {
+        owned.forget(&folder);
+    }
+    bus.log(tag, LogKind::Info, t!("{} now loose in {}", "{} ora direttamente in {}", rel.tag, dir.display()));
+    Ok(Some(dir.to_path_buf()))
 }
 
 /// The files of `rel` for the systems the repo keeps.
@@ -748,17 +926,32 @@ fn archive(bus: &Bus, p: &Project, root: &Path, releases: &[Release]) -> Result<
     let (old, pre_dir, legacy) = (dir.join(OLD), dir.join(PRE), dir.join(LEGACY));
     let mut first_err = None;
 
+    // The repo no longer keeps the newest release loose: its files go back
+    // into `<dir>/<tag>/`, which the steps below handle as usual.
+    if !p.flat {
+        if let Some(name) = owned.loose.as_ref().map(|l| sanitize_name(&l.tag)) {
+            if let Err(e) = unloose(bus, tag, &dir, &dir.join(name), &mut owned) {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+
     // No stable release upstream with the chosen files (deleted, or never
     // made): keep what is on disk.
     if stable.is_some() && kept.is_empty() {
         bus.log(tag, LogKind::Info, tr("none of the chosen files is in the stable releases", "nessuno dei file scelti è nelle release stabili"));
     }
-    if !kept.is_empty() {
+    if !kept.is_empty() && first_err.is_none() {
         let mut done = Vec::new();
         for (i, rel) in kept.iter().enumerate() {
-            let slot = if i == 0 { &dir } else { &old };
-            place(bus, tag, &sanitize_name(&rel.tag), slot, &[&dir, &old, &legacy], &mut owned);
-            match sync_release(bus, p, slot, rel, &mut owned) {
+            let result = if i == 0 && p.flat {
+                sync_flat(bus, p, &dir, &old, rel, &mut owned)
+            } else {
+                let slot = if i == 0 { &dir } else { &old };
+                place(bus, tag, &sanitize_name(&rel.tag), slot, &[&dir, &old, &legacy], &mut owned);
+                sync_release(bus, p, slot, rel, &mut owned)
+            };
+            match result {
                 Ok(Some(folder)) => done.push(folder),
                 Ok(None) => {}
                 Err(e) => {
@@ -1067,9 +1260,96 @@ mod tests {
         assert_eq!(p.keep(), 10);
     }
 
-    /// The only test that sets `SALVAGE_CONFIG`, so the others never see it.
+    /// Tests that set `SALVAGE_CONFIG` take this, so they never see each
+    /// other's; the other tests never read it.
+    static CONFIG_ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn loose_newest() {
+        let _env = CONFIG_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("salvage-loose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        let dir = base.join("rel");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SALVAGE_CONFIG", base.join("cfg").join("config.json"));
+        let bus = Bus { tx: std::sync::mpsc::channel().0, ctx: eframe::egui::Context::default(), cancel: Default::default() };
+
+        // Each release has a file whose name keeps its version and one whose name does not.
+        let rel = |tag: &str| {
+            let files = [format!("App-{tag}-win.zip"), "App-win.exe".to_string()];
+            let assets = files
+                .iter()
+                .map(|name| {
+                    let path = src.join(tag).join(name);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, format!("{tag} {name}")).unwrap();
+                    let url = format!("file:///{}", path.display().to_string().replace('\\', "/").trim_start_matches('/'));
+                    Asset { name: name.clone(), url, size: std::fs::metadata(&path).ok().map(|m| m.len()), sha256: None }
+                })
+                .collect();
+            Release { tag: tag.into(), pre: false, date: String::new(), assets }
+        };
+        let mut cfg = crate::model::Config::fresh(base.clone());
+        cfg.add("a".into(), String::new(), false, false);
+        let mut p = cfg.projects.remove(0);
+        p.releases = true;
+        p.platforms = vec![ALL.to_string()];
+        p.release_dir = Some(dir.clone());
+        p.flat = true;
+        p.keep = 2;
+        let read = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+        // The user's own file, in the folder with the release: never touched.
+        std::fs::write(dir.join("save.dat"), "mine").unwrap();
+
+        let v1 = rel("v1");
+        archive(&bus, &p, &base, std::slice::from_ref(&v1)).unwrap();
+        assert_eq!(read(dir.join("App-win.exe")), "v1 App-win.exe");
+        assert_eq!(read(dir.join("App-v1-win.zip")), "v1 App-v1-win.zip");
+        assert!(!dir.join("v1").exists());
+
+        // A new release: v1 goes to OLD/v1/, v2 takes its place.
+        let v2 = rel("v2");
+        archive(&bus, &p, &base, &[rel("v2"), rel("v1")]).unwrap();
+        assert_eq!(read(dir.join("App-win.exe")), "v2 App-win.exe");
+        assert!(dir.join("App-v2-win.zip").is_file());
+        assert!(!dir.join("App-v1-win.zip").exists());
+        assert_eq!(read(dir.join("OLD").join("v1").join("App-win.exe")), "v1 App-win.exe");
+        assert_eq!(read(dir.join("save.dat")), "mine");
+
+        // Keeping one: OLD goes.
+        p.keep = 1;
+        archive(&bus, &p, &base, std::slice::from_ref(&v2)).unwrap();
+        assert!(!dir.join("OLD").exists());
+        assert!(dir.join("App-win.exe").is_file());
+
+        // A file of the user's with the name of a new release file: nothing moves.
+        let v3 = rel("v3");
+        std::fs::write(dir.join("App-v3-win.zip"), "mine too").unwrap();
+        assert!(archive(&bus, &p, &base, std::slice::from_ref(&v3)).is_err());
+        assert_eq!(read(dir.join("App-win.exe")), "v2 App-win.exe");
+        assert_eq!(read(dir.join("App-v3-win.zip")), "mine too");
+        std::fs::remove_file(dir.join("App-v3-win.zip")).unwrap();
+        archive(&bus, &p, &base, std::slice::from_ref(&v3)).unwrap();
+        assert_eq!(read(dir.join("App-win.exe")), "v3 App-win.exe");
+        assert!(!dir.join("v3").exists());
+
+        // Turned off: the loose files go back into v3/.
+        p.flat = false;
+        archive(&bus, &p, &base, std::slice::from_ref(&v3)).unwrap();
+        assert!(!dir.join("App-win.exe").exists());
+        assert_eq!(read(dir.join("v3").join("App-win.exe")), "v3 App-win.exe");
+        assert_eq!(read(dir.join("save.dat")), "mine");
+        assert!(read_loose(&loose_path()).is_empty());
+
+        std::env::remove_var("SALVAGE_CONFIG");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn owned_list() {
+        let _env = CONFIG_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("salvage-owned-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("rel");

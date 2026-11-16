@@ -20,8 +20,16 @@ pub const KEEP_MAX: u8 = 10;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Project {
     pub id: u64,
-    /// Display name, also the folder name under the backup root.
+    /// Folder name under the backup root, and the name in the list when
+    /// [`Project::title`] is empty.
     pub name: String,
+    /// Name shown in the list instead of `name` (empty: `name`). The folders
+    /// on disk keep `name`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// Repos with the same group are listed together under it (empty: none).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
     pub url: String,
     /// Keep a bare `--mirror` clone (every branch and tag).
     #[serde(default = "yes")]
@@ -49,6 +57,10 @@ pub struct Project {
     /// Where the release files go instead of `Name-releases` under the backup folder.
     #[serde(default)]
     pub release_dir: Option<PathBuf>,
+    /// The newest release's files go straight into the releases folder
+    /// instead of `<tag>/` under it, so their path never changes.
+    #[serde(default)]
+    pub flat: bool,
     /// Keep one release file unpacked into a folder, always on the newest build.
     #[serde(default)]
     pub update: Option<Update>,
@@ -69,6 +81,15 @@ pub struct Update {
 }
 
 impl Project {
+    /// The name shown in the list.
+    pub fn label(&self) -> &str {
+        if self.title.trim().is_empty() {
+            &self.name
+        } else {
+            self.title.trim()
+        }
+    }
+
     pub fn mirror_dir(&self, root: &Path) -> PathBuf {
         root.join(format!("{}-mirror.git", self.name))
     }
@@ -111,6 +132,9 @@ pub struct Config {
     pub github_token: String,
     pub next_id: u64,
     pub projects: Vec<Project>,
+    /// Groups folded in the list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed: Vec<String>,
 }
 
 impl Config {
@@ -126,6 +150,7 @@ impl Config {
             github_token: String::new(),
             next_id: 1,
             projects: Vec::new(),
+            collapsed: Vec::new(),
         }
     }
 
@@ -154,6 +179,8 @@ impl Config {
         self.projects.push(Project {
             id,
             name,
+            title: String::new(),
+            group: String::new(),
             url,
             mirror,
             work,
@@ -164,6 +191,7 @@ impl Config {
             platforms: Vec::new(),
             keep: 1,
             release_dir: None,
+            flat: false,
             update: None,
         });
         id
@@ -173,6 +201,19 @@ impl Config {
         self.projects
             .iter()
             .any(|p| p.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Every group in use, sorted, without repeats.
+    pub fn groups(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for p in &self.projects {
+            let g = p.group.trim();
+            if !g.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(g)) {
+                out.push(g.to_string());
+            }
+        }
+        out.sort_by_key(|g| g.to_lowercase());
+        out
     }
 
     pub fn interval_secs(&self) -> i64 {

@@ -26,6 +26,7 @@ use crate::widgets::{self, button, field, toggle, Icon, Tone};
 const TITLE_H: f32 = 36.0;
 const GUTTER: f32 = 376.0;
 const ROW_H: f32 = 64.0;
+const GROUP_H: f32 = 38.0;
 /// Repos synchronised at the same time.
 const PARALLEL: usize = 2;
 
@@ -60,6 +61,8 @@ enum Act {
     ToggleTerm,
     OpenRoot,
     Import,
+    /// Fold or unfold a group in the list.
+    Fold(String),
     Minimize,
     ToggleMax,
     Close,
@@ -104,6 +107,13 @@ struct Dialog {
     original_url: String,
     name: String,
     name_touched: bool,
+    /// Name in the list (empty: the folder name).
+    title: String,
+    group: String,
+    /// Groups already in use, offered next to the group field.
+    groups: Vec<String>,
+    /// The newest release loose in the releases folder, not in `<tag>/`.
+    flat: bool,
     mirror: bool,
     work: bool,
     releases: bool,
@@ -148,6 +158,9 @@ impl Dialog {
 
     /// Copy the release and auto-update choices into the repo.
     fn apply(&self, p: &mut Project) {
+        p.title = self.title.trim().to_string();
+        p.group = self.group.trim().to_string();
+        p.flat = self.flat;
         p.releases = self.releases;
         p.platforms = self.platforms.clone();
         p.keep = self.keep;
@@ -168,6 +181,10 @@ impl Dialog {
             original_url: String::new(),
             name: String::new(),
             name_touched: false,
+            title: String::new(),
+            group: String::new(),
+            groups: Vec::new(),
+            flat: false,
             mirror: true,
             work: true,
             releases: false,
@@ -672,7 +689,9 @@ impl App {
     // ---- dialogs ---------------------------------------------------------
 
     fn open_add(&mut self) {
-        self.dialog = Some(Dialog::blank(Kind::Add));
+        let mut d = Dialog::blank(Kind::Add);
+        d.groups = self.cfg.groups();
+        self.dialog = Some(d);
     }
 
     fn open_edit(&mut self, id: u64) {
@@ -683,6 +702,9 @@ impl App {
         d.url = p.url.clone();
         d.original_url = p.url.clone();
         d.name = p.name.clone();
+        d.title = p.title.clone();
+        d.group = p.group.clone();
+        d.flat = p.flat;
         d.mirror = p.mirror;
         d.work = p.work;
         d.releases = p.releases;
@@ -695,6 +717,7 @@ impl App {
             d.upd_pre = u.pre;
         }
         d.old_urls = p.old_urls.clone();
+        d.groups = self.cfg.groups();
         self.dialog = Some(d);
     }
 
@@ -752,7 +775,7 @@ impl App {
                 };
                 let moved = url != p.url;
                 // What a sync would do differently.
-                let plan = |p: &Project| (p.mirror, p.work, p.releases, p.platforms.clone(), p.keep, p.release_dir.clone(), p.update.clone());
+                let plan = |p: &Project| (p.mirror, p.work, p.releases, p.platforms.clone(), p.keep, p.release_dir.clone(), p.flat, p.update.clone());
                 let before = plan(p);
                 if moved {
                     let old = std::mem::replace(&mut p.url, url.clone());
@@ -834,8 +857,8 @@ impl App {
         let body = Rect::from_min_max(pos2(screen.left(), screen.top() + TITLE_H + 1.0), screen.max);
         let moved = d.kind != Kind::Add && d.url.trim() != d.original_url;
         let height = match d.kind {
-            Kind::Add => 336.0 + releases_h(&d) + update_h(&d),
-            Kind::Edit(_) => 384.0 + releases_h(&d) + update_h(&d) + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
+            Kind::Add => 336.0 + NAMES_H + releases_h(&d) + update_h(&d),
+            Kind::Edit(_) => 384.0 + NAMES_H + releases_h(&d) + update_h(&d) + if d.old_urls.is_empty() { 0.0 } else { 26.0 + 20.0 * d.old_urls.len().min(4) as f32 },
             Kind::Settings => 556.0,
         };
         let height = height.min(body.height() - 24.0);
@@ -886,6 +909,7 @@ impl App {
                             if field(ui, Id::new("dlg_name"), &mut d.name, tr("folder name", "nome della cartella"), w).changed() {
                                 d.name_touched = true;
                             }
+                            names_ui(ui, &mut d, w);
                             ui.add_space(2.0);
                             toggle(ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
                             toggle(ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
@@ -893,7 +917,8 @@ impl App {
                             update_ui(ui, &mut d, w, &mut out);
                         }
                         Kind::Edit(_) => {
-                            ui.label(egui::RichText::new(&d.name).font(mono(16.0)).color(FOAM()));
+                            let head = if d.title.trim().is_empty() { d.name.clone() } else { d.title.trim().to_string() };
+                            ui.label(egui::RichText::new(fit(&head, 34)).font(mono(16.0)).color(FOAM()));
                             note(ui, tr("If the repo moved, paste the new link here. The folders on disk stay the same.", "Se il repo si è spostato, incolla qui il link nuovo. Le cartelle su disco restano le stesse."), KELP());
                             ui.add_space(6.0);
                             if field(ui, Id::new("dlg_url"), &mut d.url, tr("https://host/user/repo", "https://host/utente/repo"), w).changed() {
@@ -910,6 +935,7 @@ impl App {
                                     }
                                 }
                             }
+                            names_ui(ui, &mut d, w);
                             ui.add_space(2.0);
                             toggle(ui, &mut d.mirror, tr("full mirror: every branch and tag", "mirror completo: tutti i branch e i tag"));
                             toggle(ui, &mut d.work, tr("working copy: files ready to open, with submodules", "copia di lavoro: i file pronti da aprire, con i submodule"));
@@ -1425,7 +1451,10 @@ impl App {
             .cfg
             .projects
             .iter()
-            .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle) || p.url.to_lowercase().contains(&needle))
+            .filter(|p| {
+                needle.is_empty()
+                    || [p.name.as_str(), p.title.as_str(), p.group.as_str(), p.url.as_str()].iter().any(|t| t.to_lowercase().contains(&needle))
+            })
             .collect();
 
         let mut lui = ui.new_child(UiBuilder::new().max_rect(list).id_salt("list"));
@@ -1440,10 +1469,27 @@ impl App {
             );
             return;
         }
+        // Repos without a group first, as before groups existed; then each
+        // group, in name order, under a header that folds it. A search opens
+        // every group, so a match is never hidden.
+        let loose: Vec<&Project> = shown.iter().copied().filter(|p| p.group.trim().is_empty()).collect();
+        let groups: Vec<String> = self.cfg.groups().into_iter().filter(|g| shown.iter().any(|p| p.group.trim().eq_ignore_ascii_case(g))).collect();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut lui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            for pr in shown {
+            for pr in loose {
                 self.row(ui, pr, acts);
+            }
+            for g in &groups {
+                let members: Vec<&Project> = shown.iter().copied().filter(|p| p.group.trim().eq_ignore_ascii_case(g)).collect();
+                let folded = needle.is_empty() && self.cfg.collapsed.iter().any(|c| c.eq_ignore_ascii_case(g));
+                if self.group_header(ui, g, &members, folded) {
+                    acts.push(Act::Fold(g.clone()));
+                }
+                if !folded {
+                    for pr in members {
+                        self.row(ui, pr, acts);
+                    }
+                }
             }
         });
     }
@@ -1473,6 +1519,43 @@ impl App {
         );
     }
 
+    /// The line above a group's repos. Returns true when clicked (fold or unfold).
+    fn group_header(&self, ui: &mut Ui, name: &str, members: &[&Project], folded: bool) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), GROUP_H), Sense::click());
+        if !ui.is_rect_visible(rect) {
+            return resp.clicked();
+        }
+        let p = ui.painter();
+        let hot = resp.hovered();
+        p.rect_filled(rect, 0, alpha(FOAM(), if hot { 0.045 } else { 0.02 }));
+        // Chevron: right when folded, down when open.
+        let c = pos2(rect.left() + 30.0, rect.center().y);
+        let col = if hot { FOAM() } else { KELP() };
+        let pts = if folded {
+            [pos2(c.x - 2.5, c.y - 5.0), pos2(c.x + 2.5, c.y), pos2(c.x - 2.5, c.y + 5.0)]
+        } else {
+            [pos2(c.x - 5.0, c.y - 2.5), pos2(c.x, c.y + 2.5), pos2(c.x + 5.0, c.y - 2.5)]
+        };
+        p.line_segment([pts[0], pts[1]], Stroke::new(1.5, col));
+        p.line_segment([pts[1], pts[2]], Stroke::new(1.5, col));
+        let x = rect.left() + 58.0;
+        let title = p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, fit(name, 40), mono(12.5), FOAM());
+        // How many, and how many of them need a look.
+        let lost = members.iter().filter(|m| self.status(m).0 == Sig::Lost).count();
+        let mut tail = repos(members.len());
+        if lost > 0 {
+            tail.push_str(&t!("   {lost} not answering", "   {lost} non rispondono"));
+        }
+        p.text(pos2(title.right() + 14.0, rect.center().y), Align2::LEFT_CENTER, tail, mono(11.0), if lost > 0 { WRECK() } else { DEEP() });
+        p.line_segment(
+            [pos2(rect.left() + 18.0, rect.bottom() - 0.5), pos2(rect.right() - 18.0, rect.bottom() - 0.5)],
+            Stroke::new(1.0, LINE()),
+        );
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(if folded { tr("show the repos of this group", "mostra i repo di questo gruppo") } else { tr("hide the repos of this group", "nascondi i repo di questo gruppo") })
+            .clicked()
+    }
+
     fn row(&self, ui: &mut Ui, pr: &Project, acts: &mut Vec<Act>) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
         if !ui.is_rect_visible(rect) {
@@ -1490,7 +1573,7 @@ impl App {
         let actions_left = rect.right() - 18.0 - 3.0 * 32.0;
         let text_right = actions_left - 16.0;
 
-        let name = p.text(pos2(x, rect.top() + 12.0), Align2::LEFT_TOP, &pr.name, mono(14.5), FOAM());
+        let name = p.text(pos2(x, rect.top() + 12.0), Align2::LEFT_TOP, fit(pr.label(), 40), mono(14.5), FOAM());
         let room = ((text_right - name.right() - 14.0) / 7.0).max(0.0) as usize;
         p.text(
             pos2(name.right() + 14.0, rect.top() + 15.5),
@@ -1601,6 +1684,14 @@ impl App {
             Act::Settings => self.open_settings(),
             Act::ToggleTerm => self.term_full = !self.term_full,
             Act::Import => self.import(),
+            Act::Fold(g) => {
+                let before = self.cfg.collapsed.len();
+                self.cfg.collapsed.retain(|c| !c.eq_ignore_ascii_case(&g));
+                if self.cfg.collapsed.len() == before {
+                    self.cfg.collapsed.push(g);
+                }
+                self.save();
+            }
             Act::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Act::OpenRoot => open_folder(&self.cfg.root),
             Act::OpenDir(id) => {
@@ -1766,10 +1857,40 @@ impl eframe::App for App {
     }
 }
 
+/// Dialog height taken by the name and group rows.
+const NAMES_H: f32 = 80.0;
+
+/// The name in the list and the group, in the add and edit dialogs.
+fn names_ui(ui: &mut Ui, d: &mut Dialog, w: f32) {
+    let label = |ui: &mut Ui, text: &str| {
+        let (r, _) = ui.allocate_exact_size(vec2(150.0, 32.0), Sense::hover());
+        ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, text, mono(12.5), FOAM());
+    };
+    ui.horizontal(|ui| {
+        label(ui, tr("name in the list", "nome nella lista"));
+        let hint = if d.name.trim().is_empty() { tr("optional", "facoltativo").to_string() } else { d.name.trim().to_string() };
+        field(ui, Id::new("dlg_title"), &mut d.title, &hint, w - 158.0);
+    });
+    ui.horizontal(|ui| {
+        label(ui, tr("group", "gruppo"));
+        let hint = tr("none (e.g. Switch emulators)", "nessuno (es. emulatori Switch)");
+        if d.groups.is_empty() {
+            field(ui, Id::new("dlg_group"), &mut d.group, hint, w - 158.0);
+            return;
+        }
+        field(ui, Id::new("dlg_group"), &mut d.group, hint, w - 158.0 - 40.0);
+        let mut items = vec![widgets::Pick { label: tr("none", "nessuno").into(), detail: String::new() }];
+        items.extend(d.groups.iter().map(|g| widgets::Pick { label: g.clone(), detail: String::new() }));
+        if let Some(i) = widgets::dropdown(ui, Id::new("dlg_group_pick"), "", 32.0, &items) {
+            d.group = if i == 0 { String::new() } else { d.groups[i - 1].clone() };
+        }
+    });
+}
+
 /// Dialog height taken by the release files rows and the line under them.
 fn releases_h(d: &Dialog) -> f32 {
     if d.releases {
-        156.0
+        188.0
     } else {
         80.0
     }
@@ -1931,11 +2052,28 @@ fn releases_ui(ui: &mut Ui, d: &mut Dialog, w: f32, out: &mut Outcome) {
             Folder::Releases,
             out,
         );
+        toggle(ui, &mut d.flat, tr("newest release loose in the folder, not in <tag>/", "ultima release direttamente nella cartella, non in <tag>/"));
     }
 
     let (text, col) = match &d.choices {
         Choices::Loading(_) => (tr("reading the releases...", "leggo le release...").to_string(), KELP()),
         Choices::Fail(_, e) => (e.clone(), if d.releases { WRECK() } else { DEEP() }),
+        _ if d.releases && d.flat => (
+            if d.keep <= 1 {
+                tr(
+                    "The newest release's files go straight into the folder, the newest pre-release in prerelease/. Only files Salvage put there are ever moved or deleted.",
+                    "I file dell'ultima release vanno direttamente nella cartella, l'ultima pre-release in prerelease/. Salvage sposta o cancella solo i file che ci ha messo lui.",
+                )
+                .to_string()
+            } else {
+                t!(
+                    "The newest release's files go straight into the folder, the {} before it in OLD/<tag>/, the newest pre-release in prerelease/. Only files Salvage put there are ever moved or deleted.",
+                    "I file dell'ultima release vanno direttamente nella cartella, le {} prima in OLD/<tag>/, l'ultima pre-release in prerelease/. Salvage sposta o cancella solo i file che ci ha messo lui.",
+                    d.keep - 1
+                )
+            },
+            DEEP(),
+        ),
         _ if d.releases => (
             if d.keep <= 1 {
                 tr(

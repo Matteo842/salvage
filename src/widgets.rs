@@ -348,7 +348,8 @@ pub fn dropdown(ui: &mut Ui, id: Id, shown: &str, width: f32, items: &[Pick]) ->
                 .inner_margin(Margin::same(4))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
-                    let w = width - 10.0;
+                    // A narrow picker (an icon-sized button) still gets a readable list.
+                    let w = (width - 10.0).max(220.0);
                     let chars = (w / 7.2) as usize;
                     for (i, it) in items.iter().enumerate() {
                         let h = if it.detail.is_empty() { 28.0 } else { 44.0 };
