@@ -33,11 +33,20 @@ everything, and you can point the backup at the new link in two clicks.
   `releases.json` next to its config (not in the folder itself). Works with GitHub,
   GitLab and Gitea/Forgejo. You can keep only the releases, without mirror or
   working copy.
+  Turn on "newest release loose in the folder" and the newest release's files
+  go straight into the releases folder instead of `<tag>/`, so shortcuts to
+  them never break; the release before goes to `OLD/<tag>/` as usual. Salvage
+  only moves or deletes the files it put there (listed in `release-loose.json`
+  next to its config): your saves and settings in that folder stay.
 - **Keeps a program up to date.** Pick one release file and a folder: at every
   sync the newest build is unpacked over it (zip, 7z, tar.gz, tar.xz; any other
   file is copied as it is). Files that are only in the folder, like saves and
   settings, stay. If the program is running, nothing is touched and the update
   waits for the next sync. Stable releases only, or pre-releases too.
+- **Names and groups.** Give a repo a name for the list (handy when you keep
+  two forks of the same project), and put repos in groups, like "Switch
+  emulators": each group sits under a header that folds it. The folders on
+  disk keep their name.
 - **Follows a repo that moves.** Click the pencil, paste the new link. The
   folders on disk stay the same and the old link is kept in a history.
 - **Never deletes your backups.** Removing a repo from the list leaves its files.
@@ -54,7 +63,7 @@ On disk, under the backup folder you choose:
 Name-mirror.git/   bare mirror: all branches, all tags
 Name/              working copy, submodules included
 Name-releases/       (or the folder picked for the repo)
-  <tag>/             files of the newest release
+  <tag>/             files of the newest release (or loose in Name-releases/)
   OLD/<tag>/         the releases before it, if you keep more than one
   prerelease/<tag>/  files of the newest pre-release, if newer than those
 ```
@@ -101,13 +110,14 @@ in `releases.json`, all in that same folder. On Linux they live in
 
 Put an empty file named `portable` (or `portable.txt`) next to the executable,
 and Salvage keeps all of its own files in that folder instead: `config.json`,
-`releases.json`, `last-sync.log` and its lock file. Nothing goes in
-`%APPDATA%\Salvage` or `~/.config/salvage`, so the folder can live on a USB
-stick or be copied to another computer (only the scheduled sync, if you turn it
-on, is still registered with the system: Task Scheduler, or a systemd user
-timer). The backups themselves still go in the backup folder you
-choose. To carry over an existing setup, copy `config.json` and `releases.json`
-from `%APPDATA%\Salvage` (or `~/.config/salvage`) next to the executable.
+`releases.json`, `release-loose.json`, `last-sync.log` and its lock file.
+Nothing goes in `%APPDATA%\Salvage` or `~/.config/salvage`, so the folder can
+live on a USB stick or be copied to another computer (only the scheduled sync,
+if you turn it on, is still registered with the system: Task Scheduler, or a
+systemd user timer). The backups themselves still go in the backup folder you
+choose. To carry over an existing setup, copy `config.json`, `releases.json`
+and `release-loose.json` from `%APPDATA%\Salvage` (or `~/.config/salvage`)
+next to the executable.
 The scheduled sync runs the same executable, so it finds the same files.
 
 The Linux tarball is built with `packaging/linux/build.sh` (on Linux or WSL,
